@@ -1,0 +1,1347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>If Penguins Could Fly</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: #0b1e3a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none; touch-action: none;
+  }
+  #game { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+
+/* =====================================================================
+   IF PENGUINS COULD FLY  —  v2
+   ---------------------------------------------------------------------
+   Hold (tap / click / spacebar) to climb. Release to drop.
+   Fly through the hole in each ring. Grab fish 🐟 for points, snag
+   power-ups (⭐ smash / 🧲 magnet / 🐌 slow-mo), dodge eagles 🦅, and
+   ride through changing skies. Press M to mute.
+
+   *** TUNING ZONE ***  All feel lives in CONFIG. Everything is sized as
+   a fraction of screen height (H) so it plays the same on phone, laptop,
+   and desktop. Nothing here needs touching — bump numbers only if you
+   want to change the feel.
+   ===================================================================== */
+const CONFIG = {
+  // --- Penguin physics (screen-heights per second / per second²) ---
+  gravity:     1.35,   // how hard the plane falls when you let go (lower = floatier)
+  lift:        3.4,    // upward pull while you HOLD (lower = gentler, less twitchy)
+  drag:        2.2,    // air resistance: higher = more glide/float, less snappy fall
+  maxFall:     0.78,   // terminal dive speed
+  maxClimb:    0.82,   // top climb speed
+
+  // --- Ring scrolling / difficulty ---
+  startSpeed:  0.42,   // starting scroll speed (screen-heights / sec)
+  maxSpeed:    0.95,   // speed cap
+  speedRamp:   0.02,   // speed added per ring passed
+  ringSpacing: 0.80,   // horizontal gap between rings (screen-heights)
+  ringHeight:  0.68,   // on-screen ring height (bigger = easier opening)
+  gapWander:   0.30,   // how far ring centers drift up/down
+
+  // --- Penguin sprite ---
+  playerW:     0.22,   // drawn width (fraction of H)
+  playerX:     0.30,   // horizontal position (fraction of W)
+  hitScale:    0.42,   // collision box vs. drawn sprite (smaller = friendlier)
+
+  // --- collectibles & scoring ---
+  fishValue:   5,      // points per fish (before combo)
+  comboWindow: 1.5,    // seconds to chain pickups into a combo
+
+  // --- power-ups (seconds) ---
+  starTime:    6.0,    // ⭐ invincible + smash rings & eagles
+  starSpeedBoost: 1.6, // ⭐ speeds the world up while active (fun rush; you slow back down when it ends)
+  starGrace:   1.5,    // ⭐ extra seconds of invincibility AFTER it expires (softer landing)
+  magnetTime:  7.0,    // 🧲 pulls fish toward you
+  slowTime:    4.5,    // 🐌 slows the world down
+  slowScale:   0.55,   // how slow (0.55 = 55% speed)
+
+  // --- world ---
+  bgScroll:    0.18,   // background parallax speed
+  biomeLen:    7,      // rings per sky (sunny → sunset → night → snow → space)
+
+  // --- arena 2: the Dusty Hills ---
+  arena2At:    300,    // score at which you fly into the Dusty Hills
+  gustSpacing: 0.72,   // distance between gust-cloud slots (screen-heights)
+
+  // --- boss battle ---
+  bossAt:        5000,  // score that triggers boss 1 (press B to test it instantly)
+  bossDuration:  32,    // seconds you must survive before boss 1 goes down
+  boss2Span:     3000,  // extra points after Level 2 starts before the meaner boss 2 appears
+};
+
+/* Ring geometry, measured from the art (rings.png). One consistent frame so
+   the ring stays a fixed size; anchored by its HOLE so the opening matches
+   collision. The 4 frames are different shapes, so we use just one. */
+const RING = {
+  holeFrac:   0.578, // on-screen opening height / ring height (drives collision)
+  aspect:     0.55,  // ring width / height
+  frame:      0,     // which of the 4 rings (0-3); 0 is the cleanest head-on one
+  shineSpeed: 2.2,   // how fast the sun-glint travels around the ring
+};
+const RING_FRAMES = [
+  { src: { x: 174, y: 130, w: 256, h: 471 }, holeCX: 301, holeCY: 347, holeH: 277 },
+  { src: { x: 627, y: 129, w: 268, h: 638 }, holeCX: 760, holeCY: 358, holeH: 243 },
+  { src: { x: 173, y: 769, w: 275, h: 459 }, holeCX: 308, holeCY: 988, holeH: 241 },
+  { src: { x: 631, y: 768, w: 288, h: 461 }, holeCX: 773, holeCY: 993, holeH: 198 },
+];
+
+/* Skies, cycled every CONFIG.biomeLen rings. wash = colored overlay, dark =
+   dimming, star/snow = ambient particles. */
+const BIOMES = [
+  { name: "Sunny Skies",   wash: [120,200,255,0.00], dark: 0.00, star: 0, snow: 0 },
+  { name: "Golden Sunset", wash: [255,140,40, 0.30], dark: 0.04, star: 0, snow: 0 },
+  { name: "Starry Night",  wash: [12,18,70,  0.55], dark: 0.22, star: 1, snow: 0 },
+  { name: "Snowy Peaks",   wash: [205,228,255,0.32], dark: 0.03, star: 0, snow: 1 },
+  { name: "Outer Space",   wash: [6,6,28,    0.78], dark: 0.45, star: 1, snow: 0 },
+];
+// Arena 2 sky — a hazy, dusty wash that overrides the cycling skies.
+const DUSTY = { wash: [202,150,82, 0.42], dark: 0.06 };
+
+/* ---- Asset loading: pull from /images/, fall back to drawn shapes ---- */
+const ASSET_VER = 8;   // bump when art files change so browsers don't serve a stale cached copy
+function loadImg(path) {
+  const img = new Image();
+  img.ok = false;
+  img.onload = () => { img.ok = true; };
+  img.onerror = () => { img.ok = false; };
+  img.src = path + (path.indexOf("?") < 0 ? "?v=" + ASSET_VER : "");
+  return img;
+}
+function loadImgs(prefix, n) { const a = []; for (let i = 0; i < n; i++) a.push(loadImg(`images/${prefix}${i}.png`)); return a; }
+const ASSETS = {
+  bg:     loadImg("images/background.png"),
+  player: loadImg("images/heropenguin.png"),
+  rings:  loadImg("images/rings.png"),
+  boss:   loadImg("images/boss.png"),
+  boss2:  loadImg("images/boss2.png"),    // the Dreadnought mothership (boss 2)
+  bullet: loadImg("images/bullet.png"),
+  panic:  loadImgs("penguin_panic_", 3),  // panicked penguin variants (shown near danger)
+  fish:   loadImgs("fish_", 7),    // fish_0..6 (1 + 6 = fancy/rare worth more)
+  parts:  loadImgs("part_", 5),    // ship chunks that fly off the boss
+  clouds: loadImgs("cloud_", 9),   // cloud_0 lightest → cloud_8 darkest
+};
+// fancy fish (clownfish + rainbow) are rarer and worth bonus points
+const FISH_RARE = { 1: 15, 6: 12 };   // index → point value; others use CONFIG.fishValue
+
+/* ------------------------------- Audio -------------------------------- */
+let AC = null, muted = false, audioUnlocked = false;
+function audioInit() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (!AC) return;
+  if (AC.state === "suspended") AC.resume();
+  if (!audioUnlocked) {            // Safari/iOS: nudge the context awake inside a real tap
+    try {
+      const b = AC.createBuffer(1, 1, 22050);
+      const s = AC.createBufferSource(); s.buffer = b; s.connect(AC.destination); s.start(0);
+    } catch (e) {}
+    audioUnlocked = true;
+  }
+  startMusic();
+}
+function tone(freq, dur, type, vol, slideTo) {
+  if (!AC || muted) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || "sine";
+  o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol || 0.2, t + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(AC.destination);
+  o.start(t); o.stop(t + dur + 0.03);
+}
+function noiseBurst(dur, vol, cutoff) {
+  if (!AC || muted) return;
+  const t = AC.currentTime, n = Math.floor(AC.sampleRate * dur);
+  const buf = AC.createBuffer(1, n, AC.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const s = AC.createBufferSource(); s.buffer = buf;
+  const g = AC.createGain(); g.gain.value = vol || 0.3;
+  const f = AC.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = cutoff || 1400;
+  s.connect(f).connect(g).connect(AC.destination); s.start(t);
+}
+const SFX = {
+  flap:    () => { tone(300, 0.08, "sine", 0.11, 540); noiseBurst(0.05, 0.05, 2400); },
+  ring:    () => tone(620, 0.12, "triangle", 0.22, 940),
+  fish:    () => tone(880, 0.07, "square",   0.15, 1380),
+  combo:   (n) => tone(500 + n * 90, 0.10, "triangle", 0.20, 700 + n * 120),
+  power:   () => { tone(523, 0.10, "square", 0.16); setTimeout(() => tone(659, 0.10, "square", 0.16), 80); setTimeout(() => tone(880, 0.16, "square", 0.16), 160); },
+  smash:   () => { noiseBurst(0.18, 0.38, 1800); tone(180, 0.16, "sawtooth", 0.14, 80); },
+  crash:   () => { noiseBurst(0.4, 0.45, 900); tone(160, 0.4, "sawtooth", 0.18, 50); },
+  shoot:   () => tone(420, 0.06, "square", 0.08, 170),
+  boom:    () => { noiseBurst(0.5, 0.5, 700); tone(120, 0.5, "sawtooth", 0.20, 40); },
+  alarm:   () => { tone(440, 0.26, "sawtooth", 0.16, 300); setTimeout(() => tone(440, 0.26, "sawtooth", 0.16, 300), 300); },
+};
+
+/* ---- Background music: a light looped melody synthesized in WebAudio ---- */
+let musicTimer = null, musicStep = 0;
+const MUSIC = {
+  // gentle, breezy major loop (16 steps); 0 = rest
+  normal: [392, 0, 523, 587, 659, 0, 587, 523, 440, 0, 523, 392, 330, 0, 392, 0],
+  // tenser, lower minor loop for boss fights
+  boss:   [330, 392, 330, 294, 349, 294, 262, 311, 247, 294, 247, 196, 233, 196, 175, 0],
+};
+function musicNote(freq, dur, vol, type) {
+  if (!AC || muted || !freq) return;
+  const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || "triangle"; o.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + dur + 0.03);
+}
+function musicTick() {
+  if (!AC || muted || state === STATE.OVER || state === STATE.WIN) return;   // quiet on the end screens
+  const onBoss = bossActive;
+  const pat = onBoss ? MUSIC.boss : MUSIC.normal;
+  musicNote(pat[musicStep % pat.length], onBoss ? 0.16 : 0.22, 0.05);        // melody, sits under the SFX
+  if (musicStep % 4 === 0) musicNote(onBoss ? 98 : 131, 0.34, 0.06, "sine"); // bass on the downbeat
+  musicStep++;
+}
+function startMusic() { if (!musicTimer) musicTimer = setInterval(musicTick, 205); }
+
+/* ---------------------------- Canvas setup ---------------------------- */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.floor(W * DPR); canvas.height = Math.floor(H * DPR);
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  initAmbient();
+}
+window.addEventListener("resize", resize);
+
+/* ------------------------------ helpers ------------------------------- */
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/* ------------------------------ Game state ---------------------------- */
+const STATE = { READY: 0, PLAYING: 1, OVER: 2, WIN: 3 };
+let state = STATE.READY;
+
+let player, rings, fish, powerups, birds, gusts, particles, texts;
+let speed, score, passed, best, bgX, holding, shakeT, propAngle;
+let combo, lastScoreT;
+let starT, magnetT, slowT, graceT, hasShield;
+let trailAcc, birdCooldown, gustCooldown, pairNext, nextSpacing, lastGapY;
+let washCur, darkCur, starAmt, snowAmt, dustAmt, lastBiome;
+let arena, banner, bannerT, overAt = 0;
+let bossActive, bossBeaten, bossPhase, boss, shots, bossT, bossShootCd, bossPartsThrown, diedAtBoss;
+let level, nextBossAt, speedCap, diedAtBossLevel;
+let panicT, panicIdx;
+
+best = parseInt(localStorage.getItem("ipcf_best") || "0", 10) || 0;
+
+/* ambient particle pools (created on resize) */
+let stars = [], flakes = [];
+function initAmbient() {
+  stars = [];
+  for (let i = 0; i < 70; i++) stars.push({ x: rand(0, W), y: rand(0, H * 0.8), r: rand(0.6, 2.2), p: rand(0, 6.28) });
+  flakes = [];
+  for (let i = 0; i < 90; i++) flakes.push({ x: rand(0, W), y: rand(0, H), r: rand(1.5, 4), vx: rand(-0.04, 0.04), vy: rand(0.12, 0.28), p: rand(0, 6.28) });
+}
+
+function reset() {
+  player = { x: W * CONFIG.playerX, y: H * 0.45, vy: 0, angle: 0 };
+  rings = []; fish = []; powerups = []; birds = []; gusts = []; particles = []; texts = [];
+  speed = CONFIG.startSpeed;
+  score = 0; passed = 0; bgX = 0; holding = false; shakeT = 0; propAngle = 0;
+  combo = 0; lastScoreT = -99;
+  starT = magnetT = slowT = graceT = 0; hasShield = false;
+  bossActive = false; bossBeaten = false; bossPhase = 0; boss = null; shots = []; bossT = 0; bossShootCd = 0;
+  bossPartsThrown = 0; diedAtBoss = false;
+  level = 1; nextBossAt = CONFIG.bossAt; speedCap = CONFIG.maxSpeed; diedAtBossLevel = 1;
+  panicT = 0; panicIdx = 0;
+  trailAcc = 0; birdCooldown = H * 2; gustCooldown = H * 1.2;
+  pairNext = false; nextSpacing = CONFIG.ringSpacing; lastGapY = 0.5;
+  arena = 1;
+  // sky starts fully on biome 0 (no pop-in)
+  washCur = BIOMES[0].wash.slice(); darkCur = BIOMES[0].dark; starAmt = 0; snowAmt = 0; dustAmt = 0;
+  lastBiome = 0; banner = ""; bannerT = 0;
+  let x = W + W * 0.2;
+  for (let i = 0; i < 3; i++) { rings.push(makeRing(x)); x += H * CONFIG.ringSpacing; }
+}
+
+function makeRing(x) {
+  let cy;
+  if (pairNext) {                              // partner ring of a pair: keep close
+    cy = lastGapY + rand(-0.05, 0.05);
+    pairNext = false;
+  } else {
+    cy = lastGapY + (Math.random() * 2 - 1) * CONFIG.gapWander;
+  }
+  cy = clamp(cy, 0.22, 0.78); lastGapY = cy;
+  const r = { x, baseCy: cy * H, cy: cy * H, scored: false, smashed: false,
+              phase: rand(0, 6.283), type: "static", driftAmp: 0, driftFreq: 0 };
+  // drifting rings appear once you're warmed up, more often the deeper you go
+  if (passed >= 8 && Math.random() < clamp((passed - 8) / 55, 0, 0.45)) {
+    r.type = "drift"; r.driftAmp = H * rand(0.05, 0.12); r.driftFreq = rand(1.1, 2.1);
+  }
+  return r;
+}
+
+/* shared collectible spawners */
+function pickFishType() {
+  if (Math.random() < 0.12) return Math.random() < 0.5 ? 1 : 6;   // rare fancy fish
+  const common = [0, 2, 3, 4, 5];
+  return common[Math.random() * common.length | 0];
+}
+function spawnFishLine(x, cy, spread) {
+  const n = 2 + (Math.random() * 3 | 0);       // 2–4 fish
+  const type = pickFishType();                  // a school shares a type
+  for (let i = 0; i < n; i++) {
+    fish.push({
+      x: x + (i - (n - 1) / 2) * H * 0.06,
+      y: clamp(cy + (Math.random() * 2 - 1) * spread, H * 0.12, H * 0.88),
+      p: rand(0, 6.28), type,
+    });
+  }
+}
+function maybeSpawnPower(x, cy) {
+  if (passed >= 5 && Math.random() < 0.13) {
+    const types = ["star", "magnet", "slow", "shield", "shield"];   // shield a bit more common (very useful)
+    powerups.push({
+      x, y: clamp(cy, H * 0.18, H * 0.82),
+      type: types[Math.random() * types.length | 0], p: rand(0, 6.28),
+    });
+  }
+}
+/* attach fish + power-ups to a freshly spawned ring */
+function attachItems(r) {
+  const holeHalf = (H * CONFIG.ringHeight * RING.holeFrac) / 2;
+  if (Math.random() < 0.72) spawnFishLine(r.x, r.cy, holeHalf * 0.55);
+  maybeSpawnPower(r.x + H * CONFIG.ringSpacing * 0.5, r.cy + (Math.random() * 2 - 1) * H * 0.14);
+}
+/* clouds start light and darken as you progress toward the boss (cloud_0..8) */
+function cloudTier() { return clamp(Math.floor(score / 600), 0, ASSETS.clouds.length - 1); }
+/* a gust cloud hazard in the Dusty Hills */
+function makeGust(x, yf) {
+  return { x, baseY: yf * H, y: yf * H, r: H * rand(0.075, 0.105), p: rand(0, 6.28), scored: false, cloud: cloudTier() };
+}
+
+/* ------------------------------- Input -------------------------------- */
+function press() {
+  audioInit();
+  if (state === STATE.READY) { state = STATE.PLAYING; holding = true; SFX.flap(); }
+  else if (state === STATE.PLAYING) { holding = true; SFX.flap(); }
+  else if (state === STATE.WIN && performance.now() - overAt > 350) { reset(); state = STATE.READY; }
+  else if (state === STATE.OVER && performance.now() - overAt > 350) {
+    if (diedAtBoss) {                                       // retry straight at the boss you died on
+      reset();
+      if (diedAtBossLevel >= 2) {
+        level = 2; arena = 3; speedCap = Math.min(1.25, CONFIG.maxSpeed + 0.18);
+        speed = CONFIG.startSpeed * 1.8; score = CONFIG.bossAt + CONFIG.boss2Span;
+      } else { score = CONFIG.bossAt; }
+      state = STATE.PLAYING; startBoss(level);
+    } else { reset(); state = STATE.READY; }
+  }
+}
+function release() { holding = false; }
+
+/* Tappable speaker icon (top-right). Returns true if the tap hit it, so a
+   tap on the button toggles sound instead of making the penguin flap. */
+function muteBtnHit(px, py) {
+  const cx = W - H * 0.05, cy = H * 0.05, r = H * 0.07;
+  return Math.abs(px - cx) < r && Math.abs(py - cy) < r;
+}
+function handleMuteTap(px, py) {
+  if (!muteBtnHit(px, py)) return false;
+  audioInit();
+  muted = !muted;
+  return true;
+}
+
+canvas.addEventListener("mousedown", (e) => { e.preventDefault(); if (handleMuteTap(e.clientX, e.clientY)) return; press(); });
+window.addEventListener("mouseup", () => release());
+canvas.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  if (t && handleMuteTap(t.clientX, t.clientY)) return;
+  press();
+}, { passive: false });
+window.addEventListener("touchend", (e) => { e.preventDefault(); release(); }, { passive: false });
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); if (!e.repeat) press(); }
+  if (e.code === "KeyM") { muted = !muted; }
+  // DEBUG: press B mid-game to jump straight to the next boss fight (skips the grind)
+  if (e.code === "KeyB" && state === STATE.PLAYING && !bossActive && !bossBeaten) { score = nextBossAt; }
+  // R on the game-over screen = full restart from zero (vs. tap = retry the boss)
+  if (e.code === "KeyR" && state === STATE.OVER) { reset(); state = STATE.READY; }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); release(); }
+});
+// belt-and-suspenders: any interaction anywhere keeps the audio context awake
+["pointerdown", "touchstart", "keydown"].forEach((ev) =>
+  window.addEventListener(ev, audioInit));
+
+/* ----------------------------- scoring -------------------------------- */
+function addScore(base, x, y) {
+  const now = performance.now() / 1000;
+  combo = (now - lastScoreT < CONFIG.comboWindow) ? Math.min(combo + 1, 9) : 1;
+  lastScoreT = now;
+  const gain = base * combo;
+  score += gain;
+  addText(x, y, "+" + gain, combo > 1 ? "#ffd34d" : "#ffffff", combo > 1 ? 1.25 : 1);
+  if (combo > 1) SFX.combo(combo);
+  return gain;
+}
+function addText(x, y, str, color, scale) {
+  texts.push({ x, y, str, color, scale: scale || 1, life: 0.9, max: 0.9 });
+}
+
+/* ----------------------------- particles ------------------------------ */
+function burst(kind, x, y, n, opts) {
+  opts = opts || {};
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, 6.283), sp = rand(opts.spMin || 0.1, opts.spMax || 0.5) * H;
+    particles.push({
+      kind, x, y,
+      vx: Math.cos(a) * sp + (opts.vx || 0), vy: Math.sin(a) * sp + (opts.vy || 0),
+      life: rand(opts.lifeMin || 0.4, opts.lifeMax || 0.8),
+      max: 0.8, rot: rand(0, 6.28), vr: rand(-8, 8),
+      size: rand(opts.sMin || 0.012, opts.sMax || 0.03) * H,
+      color: opts.color || "#fff", grav: opts.grav == null ? 1.4 : opts.grav,
+    });
+  }
+}
+
+/* ------------------------------- Update ------------------------------- */
+function gameOver() {
+  diedAtBoss = bossActive; diedAtBossLevel = level;
+  state = STATE.OVER; overAt = performance.now(); shakeT = 0.45;
+  SFX.crash();
+  burst("feather", player.x, player.y, 18, { color: "#fff", spMax: 0.7, lifeMax: 1.1 });
+  burst("feather", player.x, player.y, 10, { color: "#222", spMax: 0.7, lifeMax: 1.1 });
+  if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); }
+}
+
+function consumeShield(x, y) {   // 🛡️ pops, soaks one hit, gives a brief invuln window
+  hasShield = false; graceT = Math.max(graceT, 0.9);
+  burst("spark", x, y, 20, { color: "#7fd0ff", spMax: 0.9, grav: 0.1, lifeMax: 0.6 });
+  addText(player.x, player.y - H * 0.06, "SHIELD!", "#7fd0ff", 1.25);
+  shakeT = Math.max(shakeT, 0.25); SFX.smash();
+}
+
+function update(dt) {
+  const ws = slowT > 0 ? CONFIG.slowScale : 1;     // world time-scale (slow-mo)
+  const starRush = starT > 0 ? CONFIG.starSpeedBoost : 1;  // ⭐ speeds the world up while the star is active
+  bgX -= (state === STATE.PLAYING ? speed * starRush : CONFIG.startSpeed) * CONFIG.bgScroll * H * dt * ws;
+  if (shakeT > 0) shakeT -= dt;
+  propAngle += dt * (state === STATE.PLAYING ? 26 : 10);
+
+  updateSky(dt);
+  updateAmbient(dt, ws);
+  updateParticles(dt);
+  for (let i = texts.length - 1; i >= 0; i--) {
+    const tx = texts[i]; tx.life -= dt; tx.y -= H * 0.22 * dt;
+    if (tx.life <= 0) texts.splice(i, 1);
+  }
+
+  if (state === STATE.READY) {
+    player.y = H * 0.45 + Math.sin(performance.now() / 350) * H * 0.02;
+    player.angle = Math.sin(performance.now() / 350) * 0.06;
+    return;
+  }
+  if (state !== STATE.PLAYING) return;
+
+  // power-up timers
+  if (starT > 0) { starT -= dt; if (starT <= 0) graceT = CONFIG.starGrace; }  // ⭐ ends → grace window begins
+  else if (graceT > 0) graceT -= dt;
+  if (magnetT > 0) magnetT -= dt;
+  if (slowT > 0) slowT -= dt;
+  const inv = starT > 0 || graceT > 0;   // invincible during the star AND its grace tail
+
+  // physics (player is NOT slowed — slow-mo only eases the world)
+  player.vy += (holding ? -CONFIG.lift : CONFIG.gravity) * H * dt;
+  player.vy -= player.vy * CONFIG.drag * dt;   // air resistance: bleeds off momentum so it glides & floats at the top of each tap
+  player.vy = clamp(player.vy, -CONFIG.maxClimb * H, CONFIG.maxFall * H);
+  player.y += player.vy * dt;
+  const targetAngle = clamp(player.vy / (CONFIG.maxFall * H) * 0.7, -0.5, 0.7);
+  player.angle += (targetAngle - player.angle) * Math.min(1, dt * 10);
+
+  // emit cloud-puff trail
+  trailAcc += dt;
+  const drawW = H * CONFIG.playerW, drawH = drawW * (616 / 940);
+  if (trailAcc > 0.05) {
+    trailAcc = 0;
+    particles.push({
+      kind: "puff", x: player.x - drawW * 0.42, y: player.y + drawH * 0.12,
+      vx: -speed * H * 0.25 * ws * starRush, vy: rand(-0.02, 0.02) * H,
+      life: 0.55, max: 0.55, size: H * 0.018, grow: H * 0.05, color: "#fff",
+    });
+  }
+
+  const worldDx = speed * H * dt * ws * starRush;
+  const moveLeft = (arr) => { for (const o of arr) o.x -= worldDx; };
+  moveLeft(rings); moveLeft(fish); moveLeft(powerups); moveLeft(gusts);
+
+  // player hit radius (used by boss shots; rings compute their own below)
+  const phhAll = (drawW * (616 / 940) * CONFIG.hitScale) / 2;
+
+  // ---- boss battle: takes over the arena at the threshold score ----
+  if (!bossActive && !bossBeaten && score >= nextBossAt) startBoss(level);
+  if (bossActive) {
+    updateBoss(dt, ws, phhAll);
+    if (state !== STATE.PLAYING) return;   // a boss shot may have ended the run
+  }
+
+  // enter the Dusty Hills at the threshold score
+  if (arena === 1 && score >= CONFIG.arena2At) {
+    arena = 2; banner = "Welcome to the Dusty Hills!"; bannerT = 2.8;
+  }
+
+  // drifting ring motion
+  const tnow = performance.now() / 1000;
+  for (const r of rings) {
+    r.cy = r.type === "drift"
+      ? clamp(r.baseCy + Math.sin(tnow * r.driftFreq + r.phase) * r.driftAmp, H * 0.18, H * 0.82)
+      : r.baseCy;
+  }
+
+  // recycle rings; spawn new ones only in arena 1 (variable spacing makes pairs)
+  while (rings.length && rings[0].x < -W * 0.35) rings.shift();
+  if ((arena === 1 || arena === 3) && !bossActive) {
+    const lastX = rings.length ? rings[rings.length - 1].x : W;
+    if (lastX < W + H * nextSpacing) {
+      const r = makeRing(lastX + H * nextSpacing);
+      rings.push(r);
+      attachItems(r);
+      // decide spacing to the NEXT ring: occasionally a tight pair
+      if (passed >= 16 && !pairNext && Math.random() < 0.16) { pairNext = true; nextSpacing = 0.42; }
+      else nextSpacing = CONFIG.ringSpacing;
+    }
+  }
+
+  // Dusty Hills: spawn gust-cloud slots, always leaving room to weave through
+  while (gusts.length && gusts[0].x < -W * 0.2) gusts.shift();
+  if (arena === 2 && !bossActive) {
+    gustCooldown -= worldDx;
+    if (gustCooldown <= 0) {
+      const x = W + H * 0.18, y1 = rand(0.15, 0.85);
+      gusts.push(makeGust(x, y1));
+      if (Math.random() < 0.4) {                   // sometimes a 2nd cloud, big gap kept
+        let y2 = y1 + (Math.random() < 0.5 ? -1 : 1) * rand(0.5, 0.65);
+        y2 = clamp(y2, 0.12, 0.88);
+        if (Math.abs(y2 - y1) > 0.42) gusts.push(makeGust(x + rand(-0.04, 0.04) * H, y2));
+      }
+      if (Math.random() < 0.7) spawnFishLine(x + H * CONFIG.gustSpacing * 0.5, rand(0.25, 0.75) * H, H * 0.05);
+      maybeSpawnPower(x + H * CONFIG.gustSpacing * 0.5, rand(0.25, 0.75) * H);
+      gustCooldown = H * CONFIG.gustSpacing;
+    }
+  }
+
+  // collision geometry
+  const ringH = H * CONFIG.ringHeight, ringW = ringH * RING.aspect;
+  const holeHalf = (ringH * RING.holeFrac) / 2;
+  const phw = (drawW * CONFIG.hitScale) / 2, phh = (drawH * CONFIG.hitScale) / 2;
+
+  // rings are SOLID objects now: only the ring band hurts you (flying clear over
+  // or under is safe, like the clouds); you only score by threading the hole.
+  const ringHalf = ringH / 2;
+  for (const r of rings) {
+    if (r.smashed) continue;
+    const holeTop = r.cy - holeHalf, holeBot = r.cy + holeHalf;
+    const ringTop = r.cy - ringHalf, ringBot = r.cy + ringHalf;
+
+    // crossing the ring's x: award a point ONLY if the penguin went through the hole
+    if (!r.scored && r.x < player.x) {
+      r.scored = true;
+      if (player.y > holeTop && player.y < holeBot) {
+        passed++;
+        speed = Math.min(speedCap, speed + CONFIG.speedRamp);
+        addScore(1, player.x, player.y - drawH * 0.5);
+        SFX.ring();
+        if (arena === 1) checkBiome();
+      }
+    }
+
+    // hit the solid band (between the ring edge and the hole) = crash
+    if (Math.abs(r.x - player.x) < ringW * 0.45 + phw) {
+      const pTop = player.y - phh, pBot = player.y + phh;
+      const hitUpperBand = pBot > ringTop && pTop < holeTop;   // clipped the top of the ring
+      const hitLowerBand = pTop < ringBot && pBot > holeBot;   // clipped the bottom of the ring
+      if (hitUpperBand || hitLowerBand) {
+        if (inv || hasShield) { if (!inv) consumeShield(r.x, r.cy); r.smashed = true; r.scored = true; smashFx(r.x, r.cy); }
+        else { gameOver(); return; }
+      }
+    }
+  }
+
+  // fish: magnet pull + collect
+  const magnet = magnetT > 0;
+  for (let i = fish.length - 1; i >= 0; i--) {
+    const f = fish[i];
+    if (magnet) {
+      const dxp = player.x - f.x, dyp = player.y - f.y, d = Math.hypot(dxp, dyp);
+      if (d < H * 0.4 && d > 1) { f.x += (dxp / d) * H * 1.4 * dt; f.y += (dyp / d) * H * 1.4 * dt; }
+    }
+    if (f.x < -W * 0.1) { fish.splice(i, 1); continue; }
+    if (Math.hypot(player.x - f.x, player.y - f.y) < phh + H * 0.03) {
+      fish.splice(i, 1);
+      const val = FISH_RARE[f.type] || CONFIG.fishValue;
+      addScore(val, f.x, f.y);
+      const rare = !!FISH_RARE[f.type];
+      burst("spark", f.x, f.y, rare ? 12 : 7, { color: rare ? "#7fffd4" : "#ffd34d", spMax: rare ? 0.6 : 0.4, grav: 0.3, lifeMax: 0.5 });
+      SFX.fish();
+    }
+  }
+
+  // power-ups: collect
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const pu = powerups[i];
+    if (pu.x < -W * 0.1) { powerups.splice(i, 1); continue; }
+    if (Math.hypot(player.x - pu.x, player.y - pu.y) < phh + H * 0.05) {
+      powerups.splice(i, 1);
+      if (pu.type === "star") starT = CONFIG.starTime;
+      else if (pu.type === "magnet") magnetT = CONFIG.magnetTime;
+      else if (pu.type === "shield") hasShield = true;
+      else slowT = CONFIG.slowTime;
+      const label = pu.type === "star" ? "SUPER STAR!" : pu.type === "magnet" ? "MAGNET!" : pu.type === "shield" ? "SHIELD!" : "SLOW-MO!";
+      burst("spark", pu.x, pu.y, 14, { color: pu.type === "shield" ? "#7fd0ff" : "#aef", spMax: 0.6, grav: 0.2, lifeMax: 0.7 });
+      addText(pu.x, pu.y, label, pu.type === "shield" ? "#7fd0ff" : "#aef", 1.1);
+      SFX.power();
+    }
+  }
+
+  // gust clouds: bob, score, collide
+  for (const g of gusts) {
+    g.y = g.baseY + Math.sin(tnow * 1.6 + g.p) * H * 0.03;
+    if (!g.scored && g.x < player.x) {
+      g.scored = true;
+      speed = Math.min(CONFIG.maxSpeed, speed + CONFIG.speedRamp);
+      addScore(1, player.x, player.y - drawH * 0.5);
+      SFX.ring();
+    }
+    if (Math.hypot(player.x - g.x, player.y - g.y) < g.r * 0.78 + phh * 0.7) {
+      if (inv || hasShield) { if (!inv) consumeShield(g.x, g.y); smashFx(g.x, g.y); g.x = -9999; }
+      else { gameOver(); return; }
+    }
+  }
+
+  // eagles: spawn, move, collide (arena 1 only)
+  birdCooldown -= worldDx;
+  if ((arena === 1 || arena === 3) && !bossActive && passed >= 8 && birdCooldown <= 0) {
+    birds.push({ x: W + H * 0.12, y: rand(0.2, 0.8) * H, p: rand(0, 6.28), baseY: 0 });
+    birds[birds.length - 1].baseY = birds[birds.length - 1].y;
+    birdCooldown = H * rand(1.3, 2.6);
+  }
+  const birdR = H * 0.045;
+  for (let i = birds.length - 1; i >= 0; i--) {
+    const b = birds[i];
+    b.x -= speed * H * 1.18 * dt * ws * starRush;
+    b.y = b.baseY + Math.sin(tnow * 3 + b.p) * H * 0.04;
+    if (b.x < -W * 0.15) { birds.splice(i, 1); continue; }
+    if (Math.hypot(player.x - b.x, player.y - b.y) < phh + birdR) {
+      if (inv || hasShield) { if (!inv) consumeShield(b.x, b.y); birds.splice(i, 1); smashFx(b.x, b.y); }
+      else { gameOver(); return; }
+    }
+  }
+
+  // panicked face when a bullet/part is close or the boss looms near
+  let danger = false;
+  if (bossActive) {
+    if (boss && Math.hypot(player.x - boss.x, player.y - boss.y) < boss.w * 0.55) danger = true;
+    if (!danger) for (const sh of shots) { if (Math.hypot(player.x - sh.x, player.y - sh.y) < H * 0.17) { danger = true; break; } }
+  }
+  if (danger) { if (panicT <= 0 && ASSETS.panic.length) panicIdx = (Math.random() * ASSETS.panic.length) | 0; panicT = 0.45; }
+  else if (panicT > 0) panicT -= dt;
+
+  // off the top or bottom
+  if (player.y - phh < 0 || player.y + phh > H) {
+    player.y = clamp(player.y, phh, H - phh);
+    gameOver();
+  }
+}
+
+function smashFx(x, y) {
+  burst("shard", x, y, 12, { color: "#ffd24a", spMax: 0.7, grav: 1.0, lifeMax: 0.8 });
+  burst("shard", x, y, 6, { color: "#fff6c8", spMax: 0.7, grav: 1.0, lifeMax: 0.8 });
+  addText(x, y, "+1", "#ffd34d", 1.1);
+  score += 1;
+  SFX.smash();
+}
+
+function checkBiome() {
+  const idx = Math.floor(passed / CONFIG.biomeLen) % BIOMES.length;
+  if (idx !== lastBiome) { lastBiome = idx; banner = BIOMES[idx].name; bannerT = 2.2; }
+}
+
+/* =============================== BOSS BATTLE ===========================
+   At CONFIG.bossAt the sky turns stormy and an enemy plane appears. The
+   penguin can't shoot — you survive. The boss fires bolts and, as it gets
+   wrecked, hurls chunks of its own plane. Outlast CONFIG.bossDuration and
+   it spins down to the ground: level beaten. (Press B to test instantly.) */
+function startBoss(lvl) {
+  lvl = lvl || 1;
+  bossActive = true; bossPhase = 1; bossT = 0; bossShootCd = 0; bossPartsThrown = 0;
+  shots = [];
+  rings = []; fish = []; powerups = []; birds = []; gusts = [];   // clear the arena
+  const big = lvl >= 2;
+  const spr = big ? ASSETS.boss2 : ASSETS.boss;
+  const aspect = (spr && spr.ok) ? spr.height / spr.width : (big ? 0.668 : 0.557);
+  const dw = H * (big ? 0.92 : 0.56);
+  const dh = dw * aspect;
+  const sx = W * (big ? 0.50 : 0.68), roamX = W * (big ? 0.82 : 0.68), sy = H * (big ? 0.30 : 0.32);
+  boss = { x: sx, y: -dh, baseY: sy, roamCx: roamX, roamCy: sy, w: dw, h: dh,
+           vy: 0, angle: 0, bob: rand(0, 6.28),
+           enterT: big ? 2.2 : 1.6, charging: false, chargeT: 0, aimX: 0, aimY: 0, smoke: 0,
+           level: lvl, dur: big ? CONFIG.bossDuration + 6 : CONFIG.bossDuration,
+           tele: big ? 0.48 : 0.72, cadence: big ? 0.72 : 1.30,
+           sprite: spr, pipe: !big,
+           muzX: big ? -0.42 : -0.24, muzY: big ? 0.08 : -0.18,
+           muzRx: big ? 0.05 : 0.055, muzRy: big ? 0.07 : 0.11 };
+  banner = big ? "THE DREADNOUGHT DESCENDS!" : "WARNING — THE GUN DROPS DOWN!"; bannerT = 3.2;
+  shakeT = 0.9; SFX.alarm();
+}
+function bossMuzzle() {   // the firing bore, measured from whichever sprite this boss uses
+  return { x: boss.x + boss.w * boss.muzX, y: boss.y + boss.h * boss.muzY };
+}
+function bossWin() {
+  const lvl = boss ? boss.level : level;
+  bossActive = false; bossPhase = 0; boss = null; shots = [];
+  score += 1000 * lvl; addText(W * 0.5, H * 0.42, "+" + (1000 * lvl), "#ffd34d", 1.7);
+  shakeT = 0.5; SFX.power();
+  if (lvl >= 2) {                       // final boss down — you beat the game
+    bossBeaten = true; overAt = performance.now(); state = STATE.WIN;
+    if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); }
+    return;
+  } else {                              // advance into Level 2: the Storm Front
+    level = 2; bossBeaten = false; arena = 3;
+    speedCap = Math.min(1.25, CONFIG.maxSpeed + 0.18);
+    speed = Math.max(speed, CONFIG.startSpeed * 1.8);
+    nextBossAt = score + CONFIG.boss2Span;
+    banner = "LEVEL 2 — THE STORM FRONT!"; bannerT = 4.5;
+  }
+  if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); }
+}
+function throwPart() {   // a chunk of the cruiser breaks off and flies at the penguin
+  bossPartsThrown++;
+  const ox = boss.x + rand(-0.3, 0.3) * boss.w, oy = boss.y + rand(-0.2, 0.2) * boss.h;
+  let dx = player.x - ox, dy = player.y - oy; const d = Math.hypot(dx, dy) || 1; dx /= d; dy /= d;
+  const sp = H * rand(0.34, 0.5);
+  shots.push({ x: ox, y: oy, vx: dx * sp, vy: dy * sp, r: H * 0.05, kind: "part",
+               part: (Math.random() * ASSETS.parts.length) | 0, rot: 0, spin: rand(-5, 5) });
+  burst("puff", ox, oy, 7, { color: "#2a2a2a", spMax: 0.28, lifeMax: 1.3, grav: -0.1 });
+  shakeT = Math.max(shakeT, 0.28); SFX.boom();
+}
+function fireBoltVolley(frac) {
+  const m = bossMuzzle(), big = boss.level >= 2;
+  let dx = boss.aimX - m.x, dy = boss.aimY - m.y; const d = Math.hypot(dx, dy) || 1; dx /= d; dy /= d;
+  let angs;
+  if (big) {                                              // boss 2 is meaner: starts on a fan, ends on a wall
+    if (frac < 0.33) angs = [-0.2, 0, 0.2];
+    else if (frac < 0.66) angs = [-0.42, -0.21, 0, 0.21, 0.42];
+    else angs = [-0.55, -0.33, -0.11, 0.11, 0.33, 0.55];
+  } else {                                                // boss 1 is gentle: at most a wide 3-fan, never a wall
+    if (frac < 0.55) angs = [0];                          // single aimed shot for the first half
+    else angs = [-0.28, 0, 0.28];                         // wide 3-fan with big gaps to fly through
+  }
+  const sp = H * ((big ? 0.72 : 0.5) + (big ? 0.28 : 0.16) * frac), rr = H * (big ? 0.03 : 0.026);
+  for (const a of angs) {
+    const ax = dx * Math.cos(a) - dy * Math.sin(a), ay = dx * Math.sin(a) + dy * Math.cos(a);
+    shots.push({ x: m.x, y: m.y, vx: ax * sp, vy: ay * sp, r: rr, kind: "bolt" });
+  }
+  if (big) {                                              // extra fire from the Dreadnought's underside turrets
+    for (let t = 0; t < 2; t++) {
+      const tx = boss.x + rand(-0.35, 0.3) * boss.w, ty = boss.y + rand(0.16, 0.4) * boss.h;
+      let ex = player.x - tx, ey = player.y - ty; const ed = Math.hypot(ex, ey) || 1;
+      shots.push({ x: tx, y: ty, vx: ex / ed * sp * 0.8, vy: ey / ed * sp * 0.8, r: rr * 0.9, kind: "bolt" });
+      burst("spark", tx, ty, 4, { color: "#ffcf6a", spMax: 0.4, lifeMax: 0.3, grav: 0 });
+    }
+  }
+  burst("spark", m.x, m.y, 9, { color: "#ffcf6a", spMax: 0.5, lifeMax: 0.4, grav: 0 });
+  SFX.shoot();
+}
+function updateBoss(dt, ws, phh) {
+  const T = boss.dur, now = performance.now();
+  const partMilestones = ASSETS.parts.length * (boss.level >= 2 ? 2 : 1);
+  if (bossPhase === 1) {                                  // ENTRANCE: the cruiser drops into position
+    boss.y += (boss.baseY - boss.y) * Math.min(1, dt * 2.2);
+    boss.enterT -= dt;
+    if (now % 70 < 35) shakeT = Math.max(shakeT, 0.12);
+    if (boss.enterT <= 0) { bossPhase = 2; bossShootCd = 0.7 * boss.cadence; banner = "DODGE AND SURVIVE!"; bannerT = 2.4; }
+  } else if (bossPhase === 2) {                           // FIGHT
+    bossT += dt;
+    const frac = clamp(bossT / T, 0, 1);
+    boss.smoke = frac;
+    const rm = boss.level >= 2 ? 0.45 : 1;                          // the big ship roams less
+    const tx = boss.roamCx + Math.sin(now / 1700) * W * 0.09 * rm;
+    const ty = boss.roamCy + Math.sin(now / 1250 + boss.bob) * H * 0.13 * rm;
+    if (boss.level >= 2) {                                          // big ship enters centered, then slides right for dodge room
+      boss.x += (tx - boss.x) * Math.min(1, dt * 1.1);
+      boss.y += (ty - boss.y) * Math.min(1, dt * 1.1);
+    } else { boss.x = tx; boss.y = ty; }
+    boss.angle = Math.sin(now / 1500) * (boss.level >= 2 ? 0.02 : 0.05);
+    if (Math.random() < 0.2 + frac * 1.2) {               // smoke/steam thickens with damage
+      const c = frac > 0.66 ? "#262626" : frac > 0.33 ? "#555" : "#9a9a9a";
+      burst("puff", boss.x + rand(-0.3, 0.4) * boss.w, boss.y - boss.h * 0.18, 1, { color: c, spMax: 0.16, lifeMax: 1.3, grav: -0.1 });
+    }
+    if (Math.floor(frac * partMilestones) > bossPartsThrown) throwPart();   // shed a part at each milestone
+    if (boss.charging) {                                  // telegraph: charge → fire
+      boss.chargeT -= dt;
+      if (boss.chargeT <= 0) { boss.charging = false; fireBoltVolley(frac); bossShootCd = (1.0 - 0.5 * frac) * rand(0.85, 1.2) * boss.cadence; }
+    } else {
+      bossShootCd -= dt;
+      if (bossShootCd <= 0) { boss.charging = true; boss.chargeT = boss.tele; boss.aimX = player.x; boss.aimY = player.y; }
+    }
+    if (bossT >= T) { bossPhase = 3; boss.vy = -H * 0.05; boss.charging = false; banner = "DIRECT HIT — SHE'S GOING DOWN!"; bannerT = 3.2; shakeT = 0.7; SFX.boom(); }
+  } else if (bossPhase === 3) {                           // DEATH: tip over and crash
+    boss.vy += H * 1.5 * dt; boss.y += boss.vy * dt;
+    boss.x -= H * 0.05 * dt; boss.angle += dt * 1.4;
+    if (Math.random() < 0.8) burst("spark", boss.x + rand(-0.4, 0.4) * boss.w, boss.y + rand(-0.2, 0.2) * boss.h, 4, { color: "#ff8a3d", spMax: 0.7, grav: 0.5, lifeMax: 0.7 });
+    if (Math.random() < 0.5) burst("puff", boss.x + rand(-0.4, 0.4) * boss.w, boss.y, 2, { color: "#222", spMax: 0.2, lifeMax: 1.4 });
+    if (boss.y > H + boss.h) { SFX.boom(); bossWin(); return; }
+  }
+  // move + collide projectiles (still threaten during the death plunge)
+  for (let i = shots.length - 1; i >= 0; i--) {
+    const sh = shots[i];
+    sh.x += sh.vx * dt * ws; sh.y += sh.vy * dt * ws;
+    if (sh.kind === "part") sh.rot += sh.spin * dt;
+    if (sh.x < -W * 0.14 || sh.y < -H * 0.18 || sh.y > H * 1.18) { shots.splice(i, 1); continue; }
+    const inv = starT > 0 || graceT > 0;   // recomputed per shot so a popped shield protects the rest of a volley
+    if (Math.hypot(player.x - sh.x, player.y - sh.y) < sh.r + phh * 0.8) {
+      if (inv || hasShield) { if (!inv) consumeShield(sh.x, sh.y); shots.splice(i, 1); smashFx(sh.x, sh.y); }
+      else { gameOver(); return; }
+    }
+  }
+}
+
+function updateSky(dt) {
+  const k = Math.min(1, dt * 1.5);
+  let wash, dark, star, snow, dust;
+  if (bossActive) {                               // boss fight: stormy, ominous sky
+    wash = [60, 14, 34, 0.55]; dark = 0.34; star = 0; snow = 0; dust = 0;
+  } else if (arena === 3) {                       // Level 2: the Storm Front
+    wash = [40, 30, 72, 0.5]; dark = 0.30; star = 1; snow = 0; dust = 0;
+  } else if (arena === 2) {                       // Dusty Hills overrides the sky cycle
+    wash = DUSTY.wash; dark = DUSTY.dark; star = 0; snow = 0; dust = 1;
+  } else {
+    const b = BIOMES[(state === STATE.PLAYING ? Math.floor(passed / CONFIG.biomeLen) : 0) % BIOMES.length];
+    wash = b.wash; dark = b.dark; star = b.star; snow = b.snow; dust = 0;
+  }
+  for (let i = 0; i < 4; i++) washCur[i] = lerp(washCur[i], wash[i], k);
+  darkCur = lerp(darkCur, dark, k);
+  starAmt = lerp(starAmt, star, k);
+  snowAmt = lerp(snowAmt, snow, k);
+  dustAmt = lerp(dustAmt, dust, k);
+  if (bannerT > 0) bannerT -= dt;
+}
+function updateAmbient(dt, ws) {
+  const drift = (state === STATE.PLAYING ? speed : CONFIG.startSpeed) * H * dt * ws;
+  if (starAmt > 0.01) for (const s of stars) { s.x -= drift * 0.12; if (s.x < 0) { s.x += W; s.y = rand(0, H * 0.8); } s.p += dt * 3; }
+  if (snowAmt > 0.01) for (const f of flakes) {
+    f.x -= drift * 0.25 - f.vx * H * dt; f.y += f.vy * H * dt; f.p += dt * 2;
+    if (f.y > H) { f.y = -10; f.x = rand(0, W); }
+    if (f.x < 0) f.x += W;
+  }
+  if (dustAmt > 0.01) for (const f of flakes) {   // dust drifts mostly sideways
+    f.x -= drift * 0.5; f.y += Math.sin(f.p) * H * 0.01 * dt * 60; f.p += dt * 1.5;
+    if (f.x < 0) { f.x += W; f.y = rand(0, H); }
+  }
+}
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt; if (p.life <= 0) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.grav) p.vy += p.grav * H * dt;
+    if (p.vr) p.rot += p.vr * dt;
+    if (p.grow) p.size += p.grow * dt;
+  }
+}
+
+/* -------------------------------- Draw -------------------------------- */
+function drawBackground() {
+  if (ASSETS.bg.ok) {
+    const tileW = H * (ASSETS.bg.width / ASSETS.bg.height);
+    let x = bgX % tileW; if (x > 0) x -= tileW;
+    for (let dx = x; dx < W; dx += tileW) ctx.drawImage(ASSETS.bg, dx, 0, tileW, H);
+  } else {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#4fb6f5"); g.addColorStop(0.7, "#9fd8fb");
+    g.addColorStop(0.7001, "#7cc36a"); g.addColorStop(1, "#5aa84d");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  // biome wash + dim
+  if (washCur[3] > 0.01) { ctx.fillStyle = `rgba(${washCur[0]|0},${washCur[1]|0},${washCur[2]|0},${washCur[3]})`; ctx.fillRect(0, 0, W, H); }
+  if (darkCur > 0.01) { ctx.fillStyle = `rgba(0,0,8,${darkCur})`; ctx.fillRect(0, 0, W, H); }
+}
+function drawStars() {
+  if (starAmt < 0.02) return;
+  ctx.save();
+  for (const s of stars) {
+    const a = starAmt * (0.4 + 0.6 * (0.5 + 0.5 * Math.sin(s.p)));
+    ctx.fillStyle = `rgba(255,255,240,${a})`;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.2832); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawSnow() {
+  if (snowAmt < 0.02) return;
+  ctx.save(); ctx.fillStyle = `rgba(255,255,255,${0.85 * snowAmt})`;
+  for (const f of flakes) { ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 6.2832); ctx.fill(); }
+  ctx.restore();
+}
+
+function drawRing(r, half) {
+  if (r.smashed) return;
+  const ringH = H * CONFIG.ringHeight, ringW = ringH * RING.aspect;
+  const holeHalf = (ringH * RING.holeFrac) / 2;
+  ctx.save();
+  if (half === "left") { ctx.beginPath(); ctx.rect(r.x - ringW, r.cy - ringH, ringW, ringH * 2); ctx.clip(); }
+  else if (half === "right") { ctx.beginPath(); ctx.rect(r.x, r.cy - ringH, ringW, ringH * 2); ctx.clip(); }
+  if (ASSETS.rings.ok) {
+    const f = RING_FRAMES[RING.frame], s = f.src;
+    const scale = (holeHalf * 2) / f.holeH;
+    const dx = r.x - (f.holeCX - s.x) * scale, dy = r.cy - (f.holeCY - s.y) * scale;
+    ctx.drawImage(ASSETS.rings, s.x, s.y, s.w, s.h, dx, dy, s.w * scale, s.h * scale);
+    drawShine(r, ringW, ringH, holeHalf);
+  } else {
+    ctx.lineWidth = (ringH - holeHalf * 2) * 0.55; ctx.strokeStyle = "#f2b705";
+    ctx.beginPath(); ctx.ellipse(r.x, r.cy, ringW * 0.32, holeHalf + ctx.lineWidth / 2, 0, 0, 7); ctx.stroke();
+    ctx.strokeStyle = "#ffe28a"; ctx.lineWidth *= 0.45;
+    ctx.beginPath(); ctx.ellipse(r.x, r.cy, ringW * 0.32, holeHalf + ctx.lineWidth, 0, 0, 7); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawShine(r, ringW, ringH, holeHalf) {
+  const a = performance.now() / 1000 * RING.shineSpeed + r.phase;
+  const gx = r.x + Math.cos(a) * ringW * 0.4, gy = r.cy + Math.sin(a) * ringH * 0.4;
+  const rad = ringH * 0.26;
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(r.x, r.cy, ringW * 0.5, ringH * 0.5, 0, 0, 6.2832);
+  ctx.ellipse(r.x, r.cy, ringW * 0.3, holeHalf, 0, 0, 6.2832);
+  ctx.clip("evenodd");
+  ctx.globalCompositeOperation = "lighter";
+  const g = ctx.createRadialGradient(gx, gy, 0, gx, gy, rad);
+  g.addColorStop(0, "rgba(255,255,245,0.95)"); g.addColorStop(0.4, "rgba(255,240,200,0.35)");
+  g.addColorStop(1, "rgba(255,240,200,0)");
+  ctx.fillStyle = g; ctx.fillRect(gx - rad, gy - rad, rad * 2, rad * 2);
+  ctx.restore();
+}
+
+function emoji(ch, x, y, px, rot) {
+  ctx.save(); ctx.translate(x, y); if (rot) ctx.rotate(rot);
+  ctx.font = px + "px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(ch, 0, 0); ctx.restore();
+}
+function drawFish() {
+  const t = performance.now() / 1000, fw = H * 0.08;
+  for (const f of fish) {
+    const y = f.y + Math.sin(t * 3 + f.p) * H * 0.008;
+    const img = ASSETS.fish[f.type];
+    if (img && img.ok) {
+      const h = fw * (img.height / img.width);
+      ctx.save(); ctx.translate(f.x, y); ctx.scale(-1, 1);   // art faces right; flip to swim left
+      ctx.drawImage(img, -fw / 2, -h / 2, fw, h); ctx.restore();
+    } else {
+      emoji("🐟", f.x, y, H * 0.05);
+    }
+  }
+}
+const PU_EMOJI = { star: "⭐", magnet: "🧲", slow: "🐌", shield: "🛡️" };
+function drawPowerups() {
+  const t = performance.now() / 1000, sz = H * 0.07;
+  for (const pu of powerups) {
+    const y = pu.y + Math.sin(t * 2 + pu.p) * H * 0.012;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const r = sz * (0.6 + 0.08 * Math.sin(t * 6 + pu.p));
+    const g = ctx.createRadialGradient(pu.x, y, 0, pu.x, y, r);
+    g.addColorStop(0, "rgba(180,230,255,0.7)"); g.addColorStop(1, "rgba(180,230,255,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(pu.x, y, r, 0, 6.2832); ctx.fill();
+    ctx.restore();
+    emoji(PU_EMOJI[pu.type], pu.x, y, sz);
+  }
+}
+function drawBirds() {
+  const sz = H * 0.085, t = performance.now() / 1000;
+  for (const b of birds) emoji("🦅", b.x, b.y, sz, Math.sin(t * 6 + b.p) * 0.12);
+}
+function drawGusts() {
+  const t = performance.now() / 1000;
+  for (const g of gusts) {
+    if (g.x < -1000) continue;
+    const img = ASSETS.clouds[g.cloud];
+    if (img && img.ok) {
+      const w = g.r * 2.7, h = w * (img.height / img.width);
+      ctx.drawImage(img, g.x - w / 2, g.y - h / 2, w, h);
+      continue;
+    }
+    const x = g.x, y = g.y, r = g.r, tt = t + g.p;
+    ctx.save(); ctx.translate(x, y);
+    // motion streaks trailing the gust
+    ctx.strokeStyle = "rgba(150,130,100,0.45)"; ctx.lineWidth = r * 0.07; ctx.lineCap = "round";
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.moveTo(r * 0.7, i * r * 0.4);
+      ctx.lineTo(r * (1.5 + 0.25 * Math.sin(tt * 4 + i)), i * r * 0.4);
+      ctx.stroke();
+    }
+    const puff = (dx, dy, rr, c) => { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(dx, dy, rr, 0, 6.2832); ctx.fill(); };
+    puff(0, r * 0.28, r * 0.95, "rgba(110,98,82,0.9)");      // dusty underside
+    puff(-r * 0.6, r * 0.25, r * 0.62, "rgba(110,98,82,0.9)");
+    puff(r * 0.62, r * 0.25, r * 0.62, "rgba(110,98,82,0.9)");
+    puff(0, -r * 0.05, r * 0.88, "#cdbfa6");                 // lit top
+    puff(-r * 0.58, r * 0.05, r * 0.56, "#c2b298");
+    puff(r * 0.58, r * 0.05, r * 0.56, "#c2b298");
+    puff(-r * 0.18, -r * 0.32, r * 0.5, "#dcd0ba");
+    ctx.restore();
+  }
+}
+function drawDust() {
+  if (dustAmt < 0.02) return;
+  ctx.save(); ctx.fillStyle = `rgba(198,162,112,${0.5 * dustAmt})`;
+  for (const f of flakes) { ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 6.2832); ctx.fill(); }
+  ctx.restore();
+}
+
+function drawPlayer() {
+  const drawW = H * CONFIG.playerW, drawH = drawW;
+  const star = starT > 0, grace = !star && graceT > 0;
+  if (star || grace) {   // invincible glow — full while the star is live, fast flicker while it's running out
+    // skip a few frames during grace so it visibly "blinks" → telegraphs that protection is ending
+    const blink = grace ? (Math.sin(performance.now() / 45) > -0.2) : true;
+    if (blink) {
+      ctx.save(); ctx.translate(player.x, player.y); ctx.globalCompositeOperation = "lighter";
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 80);
+      const fade = grace ? graceT / CONFIG.starGrace : 1;
+      const r = drawW * (0.6 + 0.12 * pulse);
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+      g.addColorStop(0, `rgba(255,220,90,${0.55 * fade})`); g.addColorStop(1, "rgba(255,220,90,0)");
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, r, 0, 6.2832); ctx.fill();
+      ctx.restore();
+    }
+  }
+  // 🛡️ shield bubble
+  if (hasShield) {
+    ctx.save(); ctx.translate(player.x, player.y);
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 140), r = drawW * (0.72 + 0.05 * pulse);
+    const g = ctx.createRadialGradient(0, 0, r * 0.5, 0, 0, r);
+    g.addColorStop(0, "rgba(127,208,255,0.04)"); g.addColorStop(0.82, "rgba(127,208,255,0.10)"); g.addColorStop(1, `rgba(160,225,255,${0.45 + 0.2 * pulse})`);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, r, 0, 6.2832); ctx.fill();
+    ctx.strokeStyle = `rgba(190,235,255,${0.5 + 0.25 * pulse})`; ctx.lineWidth = Math.max(1.5, drawW * 0.025);
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, 6.2832); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  const panic = (panicT > 0 && ASSETS.panic[panicIdx] && ASSETS.panic[panicIdx].ok) ? ASSETS.panic[panicIdx] : null;
+  if (panic) {                       // panicked penguin art already faces forward (no flip), and includes its own prop
+    ctx.rotate(player.angle * 0.5);
+    const pw = drawW, ph = pw * (panic.height / panic.width);
+    ctx.drawImage(panic, -pw / 2, -ph / 2, pw, ph);
+  } else {
+    ctx.rotate(player.angle);
+    if (ASSETS.player.ok) {
+      ctx.save(); ctx.scale(-1, 1);   // art's nose points left; flip to fly forward
+      ctx.drawImage(ASSETS.player, -drawW / 2, -drawH / 2, drawW, drawH);
+      ctx.restore();
+    } else {
+      drawPlaceholderPenguin(drawW);
+    }
+    drawProp(drawW, drawH);
+  }
+  ctx.restore();
+}
+function drawProp(drawW, drawH) {
+  ctx.save();
+  ctx.translate(drawW * 0.46, drawH * 0.03);
+  ctx.globalAlpha = 0.4;
+  ctx.fillStyle = "rgba(230,236,246,0.5)";
+  const rp = drawW * 0.15;
+  ctx.beginPath(); ctx.arc(0, 0, rp, 0, 6.2832); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = rp * 0.16;
+  for (let i = 0; i < 3; i++) {
+    ctx.save(); ctx.rotate(propAngle + i * 2.094);
+    ctx.beginPath(); ctx.ellipse(0, 0, rp * 0.95, rp * 0.15, 0, 0, 6.2832); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawPlaceholderPenguin(s) {
+  const u = s / 940;
+  ctx.fillStyle = "#3aa0e0"; roundRect(-380 * u, -70 * u, 760 * u, 200 * u, 90 * u); ctx.fill();
+  ctx.fillStyle = "#ff8a3d"; roundRect(-340 * u, 40 * u, 420 * u, 70 * u, 30 * u); ctx.fill();
+  ctx.fillStyle = "#e8e2d0"; roundRect(360 * u, -110 * u, 28 * u, 280 * u, 14 * u); ctx.fill();
+  ctx.fillStyle = "#c2452b"; ctx.beginPath(); ctx.arc(374 * u, 30 * u, 26 * u, 0, 7); ctx.fill();
+  ctx.fillStyle = "#222"; ctx.beginPath(); ctx.ellipse(-30 * u, -70 * u, 150 * u, 170 * u, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.ellipse(-10 * u, -40 * u, 95 * u, 120 * u, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#ff9d2e"; ctx.beginPath();
+  ctx.moveTo(120 * u, -90 * u); ctx.lineTo(190 * u, -70 * u); ctx.lineTo(120 * u, -50 * u); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(70 * u, -120 * u, 26 * u, 0, 7); ctx.fill();
+  ctx.fillStyle = "#111"; ctx.beginPath(); ctx.arc(80 * u, -120 * u, 12 * u, 0, 7); ctx.fill();
+}
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+function drawBossPipe(mx, my) {   // the gold pipe lowering the gun from the unseen Dreadnought above
+  const pw = boss.w * 0.135;
+  ctx.save();
+  const g = ctx.createLinearGradient(mx - pw / 2, 0, mx + pw / 2, 0);
+  g.addColorStop(0, "#4a330f"); g.addColorStop(0.42, "#e8c45c"); g.addColorStop(0.58, "#fff0c0"); g.addColorStop(1, "#5a3f14");
+  ctx.fillStyle = g; ctx.fillRect(mx - pw / 2, -30, pw, my + 30);
+  ctx.lineWidth = Math.max(1.5, pw * 0.10); ctx.strokeStyle = "rgba(35,24,8,0.55)";
+  for (let y = my; y > -30; y -= pw * 0.6) { ctx.beginPath(); ctx.moveTo(mx - pw / 2, y); ctx.lineTo(mx + pw / 2, y); ctx.stroke(); }
+  ctx.restore();
+}
+function drawBoss() {
+  if (!boss) return;
+  if (boss.pipe) drawBossPipe(boss.x + boss.w * 0.06, boss.y - boss.h * 0.42);   // gun hangs from above
+  // telegraph: aim line + charging muzzle glow before a volley
+  if (boss.charging) {
+    const m = bossMuzzle(), k = 1 - boss.chargeT / boss.tele;
+    ctx.save(); ctx.globalCompositeOperation = "lighter";
+    ctx.strokeStyle = `rgba(255,90,60,${0.2 + 0.5 * k})`; ctx.lineWidth = H * (0.003 + 0.006 * k);
+    ctx.setLineDash([H * 0.02, H * 0.018]);
+    ctx.beginPath(); ctx.moveTo(m.x, m.y); ctx.lineTo(boss.aimX, boss.aimY); ctx.stroke();
+    ctx.setLineDash([]);
+    const r = H * (0.018 + 0.05 * k);
+    const cg = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, r);
+    cg.addColorStop(0, "rgba(255,225,150,0.95)"); cg.addColorStop(1, "rgba(255,90,40,0)");
+    ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(m.x, m.y, r, 0, 6.2832); ctx.fill();
+    ctx.restore();
+  }
+  ctx.save();
+  ctx.translate(boss.x, boss.y); ctx.rotate(boss.angle || 0);
+  const img = boss.sprite || ASSETS.boss;
+  // dark glowing barrel-mouth filling the bore so the cannon reads solid
+  const bx = boss.w * boss.muzX, by = boss.h * boss.muzY, brx = boss.w * boss.muzRx, bry = boss.h * boss.muzRy;
+  const bore = ctx.createRadialGradient(bx, by, 1, bx, by, bry);
+  bore.addColorStop(0, "#070605"); bore.addColorStop(0.72, "#140e08"); bore.addColorStop(1, "rgba(30,20,12,0)");
+  ctx.fillStyle = bore; ctx.beginPath(); ctx.ellipse(bx, by, brx, bry, 0, 0, 6.2832); ctx.fill();
+  if (boss.charging) {   // ember building inside the barrel while it charges
+    ctx.save(); ctx.globalCompositeOperation = "lighter";
+    const k = 1 - boss.chargeT / boss.tele, eg = ctx.createRadialGradient(bx, by, 0, bx, by, bry * (0.5 + 0.5 * k));
+    eg.addColorStop(0, `rgba(255,180,90,${0.8 * k})`); eg.addColorStop(1, "rgba(255,90,40,0)");
+    ctx.fillStyle = eg; ctx.beginPath(); ctx.ellipse(bx, by, brx, bry, 0, 0, 6.2832); ctx.fill(); ctx.restore();
+  }
+  if (img && img.ok) {
+    ctx.drawImage(img, -boss.w / 2, -boss.h / 2, boss.w, boss.h);
+  } else {                                                    // fallback cannon
+    ctx.fillStyle = "#6b2230"; roundRect(-boss.w / 2, -boss.h * 0.3, boss.w, boss.h * 0.6, boss.h * 0.2); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawShots() {
+  for (const sh of shots) {
+    if (sh.kind === "part") {                                 // tumbling chunk of the cruiser
+      const img = ASSETS.parts[sh.part];
+      ctx.save(); ctx.translate(sh.x, sh.y); ctx.rotate(sh.rot);
+      if (img && img.ok) { const w = sh.r * 2.6, h = w * (img.height / img.width); ctx.drawImage(img, -w / 2, -h / 2, w, h); }
+      else { ctx.fillStyle = "#caa23a"; roundRect(-sh.r, -sh.r * 0.6, sh.r * 2, sh.r * 1.2, sh.r * 0.25); ctx.fill(); }
+      ctx.restore();
+    } else {                                                  // fiery bolt — tip leads the velocity
+      const img = ASSETS.bullet, ang = Math.atan2(sh.vy, sh.vx);
+      ctx.save(); ctx.translate(sh.x, sh.y);
+      if (img && img.ok) {
+        const w = sh.r * 4.6, h = w * (img.height / img.width);
+        ctx.rotate(ang + Math.PI);                            // asset points left; align tip to travel dir
+        ctx.drawImage(img, -w / 2, -h / 2, w, h);
+      } else {
+        ctx.globalCompositeOperation = "lighter";
+        const g = ctx.createRadialGradient(0, 0, 0, 0, 0, sh.r * 2.2);
+        g.addColorStop(0, "rgba(255,140,80,0.95)"); g.addColorStop(1, "rgba(255,60,40,0)");
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, sh.r * 2.2, 0, 6.2832); ctx.fill();
+        ctx.fillStyle = "#fff2c8"; ctx.beginPath(); ctx.arc(0, 0, sh.r, 0, 6.2832); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+}
+function drawBossHud() {
+  if (!bossActive || bossPhase !== 2) return;
+  const hp = clamp(1 - bossT / boss.dur, 0, 1);              // survive-timer shown as the boss's health
+  const nm = boss.level >= 2 ? "⚙ DREADNOUGHT" : "⚙ BATTLE CRUISER";
+  const bw = W * 0.6, bh = H * 0.024, x = (W - bw) / 2, y = H * 0.055;
+  ctx.save();
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#fff"; ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = Math.max(2, H * 0.005);
+  ctx.font = `800 ${Math.round(H * 0.03)}px -apple-system, system-ui, sans-serif`;
+  ctx.strokeText(nm, W / 2, y - H * 0.012); ctx.fillText(nm, W / 2, y - H * 0.012);
+  ctx.fillStyle = "rgba(0,0,0,0.4)"; roundRect(x, y, bw, bh, bh / 2); ctx.fill();
+  ctx.fillStyle = hp > 0.3 ? "#ff5a4a" : "#ffd34d"; roundRect(x, y, bw * hp, bh, bh / 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const a = Math.max(0, p.life / p.max);
+    if (p.kind === "puff") {
+      ctx.globalAlpha = a * 0.5; ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, 6.2832); ctx.fill();
+    } else if (p.kind === "feather") {
+      ctx.globalAlpha = a; ctx.fillStyle = p.color;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+      ctx.beginPath(); ctx.ellipse(0, 0, p.size, p.size * 0.45, 0, 0, 6.2832); ctx.fill(); ctx.restore();
+    } else { // spark / shard
+      ctx.globalAlpha = a; ctx.fillStyle = p.color;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+      ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size); ctx.restore();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+function drawTexts() {
+  ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = Math.max(2, H * 0.005); ctx.strokeStyle = "rgba(0,0,0,0.5)";
+  for (const t of texts) {
+    const fs = H * 0.04 * t.scale * (0.7 + 0.3 * Math.min(1, (t.max - t.life) * 6));
+    ctx.globalAlpha = Math.min(1, t.life / 0.3);
+    ctx.font = `900 ${fs}px -apple-system, system-ui, sans-serif`;
+    ctx.fillStyle = t.color;
+    ctx.strokeText(t.str, t.x, t.y); ctx.fillText(t.str, t.x, t.y);
+  }
+  ctx.globalAlpha = 1; ctx.restore();
+}
+
+/* ------------------------------- HUD ---------------------------------- */
+function drawScore() {
+  ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#fff"; ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.lineWidth = Math.max(3, H * 0.008);
+  const fs = Math.round(H * 0.075);
+  ctx.font = `900 ${fs}px -apple-system, system-ui, sans-serif`;
+  ctx.strokeText(String(score), W / 2, H * 0.12); ctx.fillText(String(score), W / 2, H * 0.12);
+  if (combo > 1 && performance.now() / 1000 - lastScoreT < CONFIG.comboWindow) {
+    const cf = Math.round(H * 0.034);
+    ctx.font = `800 ${cf}px -apple-system, system-ui, sans-serif`; ctx.fillStyle = "#ffd34d";
+    ctx.strokeText("Combo x" + combo, W / 2, H * 0.155); ctx.fillText("Combo x" + combo, W / 2, H * 0.155);
+  }
+  ctx.restore();
+  drawPowerHud();
+  ctx.save(); ctx.globalAlpha = muted ? 0.6 : 0.85; emoji(muted ? "🔇" : "🔊", W - H * 0.05, H * 0.05, H * 0.045); ctx.restore();
+}
+function drawPowerHud() {
+  const items = [];
+  if (starT > 0) items.push(["⭐", starT, CONFIG.starTime]);
+  if (magnetT > 0) items.push(["🧲", magnetT, CONFIG.magnetTime]);
+  if (slowT > 0) items.push(["🐌", slowT, CONFIG.slowTime]);
+  const sz = H * 0.05, bw = H * 0.11;
+  let y = H * 0.06;
+  for (const [ch, t, max] of items) {
+    const x = H * 0.04;
+    emoji(ch, x + sz * 0.3, y, sz);
+    ctx.fillStyle = "rgba(0,0,0,0.35)"; roundRect(x + sz * 0.7, y - sz * 0.13, bw, sz * 0.26, sz * 0.13); ctx.fill();
+    ctx.fillStyle = "#7fe0ff"; roundRect(x + sz * 0.7, y - sz * 0.13, bw * (t / max), sz * 0.26, sz * 0.13); ctx.fill();
+    y += sz * 1.25;
+  }
+  if (hasShield) { emoji("🛡️", H * 0.04 + sz * 0.3, y, sz); }   // held charge (no timer bar)
+}
+function drawBanner() {
+  if (bannerT <= 0) return;
+  ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.globalAlpha = Math.min(1, bannerT / 0.5);
+  const fs = Math.round(H * 0.055);
+  ctx.font = `900 ${fs}px -apple-system, system-ui, sans-serif`;
+  ctx.lineWidth = Math.max(3, H * 0.009); ctx.strokeStyle = "rgba(0,0,0,0.55)"; ctx.fillStyle = "#fff";
+  ctx.strokeText(banner, W / 2, H * 0.26); ctx.fillText(banner, W / 2, H * 0.26);
+  ctx.restore();
+}
+
+function panel(title, lines) {
+  ctx.save(); ctx.fillStyle = "rgba(8,22,48,0.66)"; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#ffd34d"; ctx.strokeStyle = "rgba(0,0,0,0.5)";
+  let fs = Math.round(H * 0.08); ctx.lineWidth = Math.max(3, H * 0.01);
+  ctx.font = `900 ${fs}px -apple-system, system-ui, sans-serif`;
+  ctx.strokeText(title, W / 2, H * 0.32); ctx.fillText(title, W / 2, H * 0.32);
+  ctx.lineWidth = Math.max(2, H * 0.006);
+  let y = H * 0.44;
+  for (const ln of lines) {
+    if (!ln.text) { y += H * 0.02; continue; }
+    fs = Math.round(H * (ln.big ? 0.06 : 0.036));
+    ctx.font = `${ln.big ? "800" : "600"} ${fs}px -apple-system, system-ui, sans-serif`;
+    ctx.fillStyle = ln.color || "#fff";
+    ctx.strokeText(ln.text, W / 2, y); ctx.fillText(ln.text, W / 2, y);
+    y += fs * 1.5;
+  }
+  ctx.restore();
+}
+
+/* ------------------------------- Loop --------------------------------- */
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000; last = now;
+  if (dt > 0.05) dt = 0.05;
+  // keep audio alive: browsers (or another app grabbing sound) can re-suspend
+  // the context mid-game — nudge it back awake every frame so sound recovers
+  if (AC && AC.state !== "running" && !muted) AC.resume();
+  update(dt);
+
+  ctx.save();
+  if (shakeT > 0) { const m = shakeT * H * 0.06; ctx.translate(rand(-m, m), rand(-m, m)); }
+  drawBackground();
+  drawStars();
+  drawFish();
+  drawPowerups();
+  drawGusts();
+  for (const r of rings) drawRing(r, "left");
+  if (bossActive) drawBoss();
+  drawPlayer();
+  for (const r of rings) drawRing(r, "right");
+  if (bossActive) drawShots();
+  drawBirds();
+  drawParticles();
+  drawTexts();
+  drawSnow();
+  drawDust();
+  ctx.restore();
+
+  if (state === STATE.PLAYING) { drawScore(); drawBanner(); drawBossHud(); }
+  else if (state === STATE.READY) {
+    panel("If Penguins Could Fly", [
+      { text: "Hold to fly up — let go to dive" },
+      { text: "🐟 grab fish   ⭐🧲🐌🛡️ power-ups   🦅 dodge" },
+      { text: "Tap / Click / Spacebar to start", color: "#ffd34d" },
+      { text: best > 0 ? "Best: " + best : "" },
+    ]);
+  } else if (state === STATE.WIN) {
+    drawScore();
+    panel("🏆 YOU WIN! 🏆", [
+      { text: "You beat the Dreadnought!", color: "#ffd34d", big: true },
+      { text: "Final Score: " + score, big: true },
+      { text: "Best: " + best, color: "#ffd34d" },
+      { text: "" },
+      { text: "Tap to fly again" },
+    ]);
+  } else if (state === STATE.OVER) {
+    drawScore();
+    panel("Game Over", [
+      { text: "Score: " + score, big: true },
+      { text: "Best: " + best, color: "#ffd34d" },
+      { text: "" },
+      { text: diedAtBoss ? "Tap to retry the boss" : "Tap to play again", color: diedAtBoss ? "#ff8a3d" : "#fff" },
+      { text: diedAtBoss ? "Press R to restart from the start" : "" },
+    ]);
+  }
+  requestAnimationFrame(frame);
+}
+
+resize();
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
