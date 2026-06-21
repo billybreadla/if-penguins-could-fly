@@ -120,11 +120,11 @@ function loadImg(path) {
 }
 function loadImgs(prefix, n) { const a = []; for (let i = 0; i < n; i++) a.push(loadImg(`images/${prefix}${i}.png`)); return a; }
 const ASSETS = {
-  bg:     loadImg("images/background.png"),
+  bg:     loadImg("images/background.webp"),
   player: loadImg("images/heropenguin.png"),
-  rings:  loadImg("images/rings.png"),
-  boss:   loadImg("images/boss.png"),
-  boss2:  loadImg("images/boss2.png"),    // the Dreadnought mothership (boss 2)
+  rings:  loadImg("images/rings.webp"),
+  boss:   loadImg("images/boss.webp"),
+  boss2:  loadImg("images/boss2.webp"),    // the Dreadnought mothership (boss 2)
   bullet: loadImg("images/bullet.png"),
   panic:  loadImgs("penguin_panic_", 3),  // panicked penguin variants (shown near danger)
   fish:   loadImgs("fish_", 7),    // fish_0..6 (1 + 6 = fancy/rare worth more)
