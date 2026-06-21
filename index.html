@@ -75,9 +75,9 @@ const CONFIG = {
   gustSpacing: 0.72,   // distance between gust-cloud slots (screen-heights)
 
   // --- boss battle ---
-  bossAt:        5000,  // score that triggers boss 1 (press B to test it instantly)
+  bossAt:         600,  // score that triggers boss 1
   bossDuration:  32,    // seconds you must survive before boss 1 goes down
-  boss2Span:     3000,  // extra points after Level 2 starts before the meaner boss 2 appears
+  boss2Span:      800,  // extra points after Level 2 starts before the meaner boss 2 appears
 };
 
 /* Ring geometry, measured from the art (rings.png). One consistent frame so
@@ -379,8 +379,6 @@ window.addEventListener("touchend", (e) => { e.preventDefault(); release(); }, {
 window.addEventListener("keydown", (e) => {
   if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); if (!e.repeat) press(); }
   if (e.code === "KeyM") { muted = !muted; }
-  // DEBUG: press B mid-game to jump straight to the next boss fight (skips the grind)
-  if (e.code === "KeyB" && state === STATE.PLAYING && !bossActive && !bossBeaten) { score = nextBossAt; }
   // R on the game-over screen = full restart from zero (vs. tap = retry the boss)
   if (e.code === "KeyR" && state === STATE.OVER) { reset(); state = STATE.READY; }
 });
@@ -673,8 +671,7 @@ function update(dt) {
 function smashFx(x, y) {
   burst("shard", x, y, 12, { color: "#ffd24a", spMax: 0.7, grav: 1.0, lifeMax: 0.8 });
   burst("shard", x, y, 6, { color: "#fff6c8", spMax: 0.7, grav: 1.0, lifeMax: 0.8 });
-  addText(x, y, "+1", "#ffd34d", 1.1);
-  score += 1;
+  addScore(1, x, y);   // route smashes through addScore so they build the combo chain
   SFX.smash();
 }
 
@@ -687,7 +684,7 @@ function checkBiome() {
    At CONFIG.bossAt the sky turns stormy and an enemy plane appears. The
    penguin can't shoot — you survive. The boss fires bolts and, as it gets
    wrecked, hurls chunks of its own plane. Outlast CONFIG.bossDuration and
-   it spins down to the ground: level beaten. (Press B to test instantly.) */
+   it spins down to the ground: level beaten. */
 function startBoss(lvl) {
   lvl = lvl || 1;
   bossActive = true; bossPhase = 1; bossT = 0; bossShootCd = 0; bossPartsThrown = 0;
