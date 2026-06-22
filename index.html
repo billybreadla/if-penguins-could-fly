@@ -121,7 +121,7 @@ const BIOMES = [
 const DUSTY = { wash: [202,150,82, 0.42], dark: 0.06 };
 
 /* ---- Asset loading: pull from /images/, fall back to drawn shapes ---- */
-const ASSET_VER = 10;  // webp diet: every sprite/atlas to webp (9.1MB -> 1.4MB)
+const ASSET_VER = 11;  // V5 art overhaul: painted worlds, title art, kit skins, flight anim, boss cards
 function loadImg(path) {
   const img = new Image();
   img.ok = false;
@@ -147,6 +147,35 @@ const ASSETS = {
   adventure: loadImg("images/powerups-obstacle-v2.webp"), // matching power-ups + albatross atlas
   hazards: loadImg("images/hazards-v3.webp"),
   missions: loadImg("images/missions-v3.webp"),
+  // --- V5 art overhaul (all painted by Codex; procedural code stays as fallback) ---
+  titleHero: loadImg("images/title-hero-v5.webp"),       // start-screen key art
+  wordmark:  loadImg("images/title-wordmark-v5.webp"),   // transparent logo
+  heroStrip: loadImg("images/hero-flight-strip-v5.webp"),// 4x 520px flight poses (Classic)
+  worldBg: {                                             // painted sky per world (see activeWorld)
+    1: loadImg("images/world-sunset-v5.webp"),
+    2: loadImg("images/world-aurora-v5.webp"),
+    3: loadImg("images/world-snowy-peaks-v5.webp"),
+    4: loadImg("images/world-outer-space-v5.webp"),
+    5: loadImg("images/world-dusty-hills-v5.webp"),
+    6: loadImg("images/world-storm-v5.webp"),
+    7: loadImg("images/world-storm-v5.webp"),
+  },
+  skins: [                                               // by selectedKit; 0 = animated heroStrip
+    null,
+    loadImg("images/plane-sunset-v5.webp"),
+    loadImg("images/plane-aurora-v5.webp"),
+    loadImg("images/plane-midnight-v5.webp"),
+  ],
+  story: [                                               // one inset per flight-log page
+    loadImg("images/story-determined-v5.webp"),
+    loadImg("images/story-festival-v5.webp"),
+    loadImg("images/story-captain-albatross-v5.webp"),
+  ],
+  bossCards: {                                           // entrance portrait by boss level
+    1: loadImg("images/boss-card-cruiser-v5.webp"),
+    2: loadImg("images/boss-card-gun-deck-v5.webp"),
+    3: loadImg("images/boss-card-dreadnought-v5.webp"),
+  },
 };
 const ADVENTURE_FRAMES = {
   star:   { x: 0, w: 434 }, magnet: { x: 434, w: 434 }, slow: { x: 868, w: 434 },
@@ -1136,21 +1165,41 @@ function drawStorybookWorld(world) {
     ctx.strokeStyle="rgba(246,251,255,.22)";ctx.lineWidth=H*.006;for(let i=0;i<8;i++){const x=(i*W*.17+bgX*.4)%(W*1.2);ctx.beginPath();ctx.moveTo(x,-20);ctx.lineTo(x-H*.22,H*.55);ctx.stroke();}
   }
 }
+function drawTiledBg(img) {            // horizontally-tiling parallax background
+  const tileW = H * (img.width / img.height);
+  let x = bgX % tileW; if (x > 0) x -= tileW;
+  for (let dx = x; dx < W; dx += tileW) ctx.drawImage(img, dx, 0, tileW, H);
+}
+function drawCoverImage(img) {          // object-fit: cover, full screen
+  const s = Math.max(W / img.width, H / img.height);
+  const w = img.width * s, h = img.height * s;
+  ctx.drawImage(img, (W - w) / 2, (H - h) / 2, w, h);
+}
+function drawImageCoverRect(img, rx, ry, rw, rh, r) {   // object-fit: cover into a rounded rect
+  const s = Math.max(rw / img.width, rh / img.height);
+  const w = img.width * s, h = img.height * s;
+  ctx.save(); roundRect(rx, ry, rw, rh, r); ctx.clip();
+  ctx.drawImage(img, rx + (rw - w) / 2, ry + (rh - h) / 2, w, h);
+  ctx.restore();
+}
 function drawBackground() {
   const world = activeWorld();
-  if (world === 0 && ASSETS.bg.ok) {
-    const tileW = H * (ASSETS.bg.width / ASSETS.bg.height);
-    let x = bgX % tileW; if (x > 0) x -= tileW;
-    for (let dx = x; dx < W; dx += tileW) ctx.drawImage(ASSETS.bg, dx, 0, tileW, H);
+  const painted = world === 0 ? ASSETS.bg : (ASSETS.worldBg[world] || null);
+  if (painted && painted.ok) {
+    drawTiledBg(painted);
   } else if (world === 0) {
     const g = ctx.createLinearGradient(0, 0, 0, H);
     g.addColorStop(0, "#4fb6f5"); g.addColorStop(0.7, "#9fd8fb");
     g.addColorStop(0.7001, "#7cc36a"); g.addColorStop(1, "#5aa84d");
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
   } else drawStorybookWorld(world);
-  // biome wash + dim
-  if (washCur[3] > 0.01) { ctx.fillStyle = `rgba(${washCur[0]|0},${washCur[1]|0},${washCur[2]|0},${washCur[3]})`; ctx.fillRect(0, 0, W, H); }
-  if (darkCur > 0.01) { ctx.fillStyle = `rgba(0,0,8,${darkCur})`; ctx.fillRect(0, 0, W, H); }
+  // biome wash + dim — softened over a painted scene (the art already carries the mood),
+  // full strength over the procedural fallback so the worlds still read as different.
+  const paintedOK = !!(painted && painted.ok);
+  const washA = washCur[3] * (paintedOK ? 0.35 : 1);
+  const darkA = darkCur * (paintedOK ? 0.45 : 1);
+  if (washA > 0.01) { ctx.fillStyle = `rgba(${washCur[0]|0},${washCur[1]|0},${washCur[2]|0},${washA})`; ctx.fillRect(0, 0, W, H); }
+  if (darkA > 0.01) { ctx.fillStyle = `rgba(0,0,8,${darkA})`; ctx.fillRect(0, 0, W, H); }
 }
 function drawStars() {
   if (starAmt < 0.02) return;
@@ -1360,16 +1409,41 @@ function drawPlayer() {
     ctx.drawImage(panic, -pw / 2, -ph / 2, pw, ph);
   } else {
     ctx.rotate(player.angle);
-    if (ASSETS.player.ok) {
-      ctx.save(); ctx.scale(-1, 1);   // art's nose points left; flip to fly forward
-      ctx.drawImage(ASSETS.player, -drawW / 2, -drawH / 2, drawW, drawH);
-      ctx.restore();
-    } else {
-      drawPlaceholderPenguin(drawW);
-    }
+    if (!drawHero(drawW, drawH)) drawPlaceholderPenguin(drawW);
     drawProp(drawW, drawH);
   }
   ctx.restore();
+}
+// Which flight pose to show on the animated Classic strip (all art is nose-left).
+function heroFrame() {
+  if (steeringLeft) return 2;                          // bank up/left
+  if (steeringRight) return 3;                         // bank down/right
+  if (holding) return 1;                               // flipper-up climb
+  if (player.vy > CONFIG.maxFall * H * 0.5) return 3;  // steep dive
+  return 0;                                            // neutral cruise
+}
+// Draws the equipped hero: a painted skin (kits 1-3) or the animated Classic
+// strip (kit 0). Returns false if no art is ready so the caller can fall back.
+function drawHero(drawW, drawH) {
+  const skin = ASSETS.skins[selectedKit];
+  if (skin && skin.ok) {
+    ctx.save(); ctx.scale(-1, 1);   // art's nose points left; flip to fly forward
+    ctx.drawImage(skin, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.restore(); return true;
+  }
+  const strip = ASSETS.heroStrip;
+  if (strip && strip.ok) {
+    const cell = strip.height;      // square 520px cells laid left-to-right
+    ctx.save(); ctx.scale(-1, 1);
+    ctx.drawImage(strip, heroFrame() * cell, 0, cell, cell, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.restore(); return true;
+  }
+  if (ASSETS.player.ok) {
+    ctx.save(); ctx.scale(-1, 1);
+    ctx.drawImage(ASSETS.player, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.restore(); return true;
+  }
+  return false;
 }
 function drawProp(drawW, drawH) {
   ctx.save();
@@ -1500,6 +1574,17 @@ function drawBossHud() {
   ctx.restore();
 }
 
+// Illustrated boss portrait shown during the entrance, fading as the ship arrives.
+function drawBossEntrance() {
+  if (!bossActive || !boss || bossPhase !== 1) return;
+  const card = ASSETS.bossCards[boss.level];
+  if (!card || !card.ok) return;
+  const sz = H * 0.40, w = sz * (card.width / card.height);
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, boss.enterT / 0.6);
+  ctx.drawImage(card, (W - w) / 2, H * 0.14, w, sz);
+  ctx.restore();
+}
 function drawParticles() {
   for (const p of particles) {
     const a = Math.max(0, p.life / p.max);
@@ -1612,22 +1697,62 @@ function fitTitle(text, maxWidth, startSize) {
   return fs + 2;
 }
 function drawStoryPanel() {
-  const u = Math.min(H, W * 0.72), pw = Math.min(W * 0.72, u * 1.05), ph = Math.min(H * 0.72, u * 0.72);
+  const u = Math.min(H, W * 0.72), pw = Math.min(W * 0.86, u * 1.32), ph = Math.min(H * 0.76, u * 0.66);
   const x = (W - pw) / 2, y = (H - ph) / 2;
   ctx.save(); ctx.fillStyle = "rgba(8,24,55,.58)"; ctx.fillRect(0,0,W,H);
   roundedPanel(x, y, pw, ph, u*.035, "#f6f0d8", "#102a56");
-  ctx.strokeStyle="rgba(16,42,86,.18)";ctx.lineWidth=1;for(let ly=y+ph*.25;ly<y+ph*.80;ly+=u*.055){ctx.beginPath();ctx.moveTo(x+pw*.08,ly);ctx.lineTo(x+pw*.92,ly);ctx.stroke();}
-  ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillStyle="#ff7a45";ctx.font=`800 ${Math.round(u*.022)}px -apple-system,system-ui,sans-serif`;ctx.fillText(`LACHLAN'S FLIGHT LOG  •  PAGE ${storyPage+1} OF 3`,W/2,y+ph*.10);
+  ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillStyle="#ff7a45";ctx.font=`800 ${Math.round(u*.022)}px -apple-system,system-ui,sans-serif`;ctx.fillText(`LACHLAN'S FLIGHT LOG  •  PAGE ${storyPage+1} OF 3`,W/2,y+ph*.085);
   const pages = [
     ["PENGUINS CAN'T FLY.", "Everybody knows that.", "Nobody remembered to tell this penguin."],
     ["THE FLYING FISH FESTIVAL", "is happening beyond the impossible skies.", "One tiny plane. One very determined pilot."],
     ["THE MISSION", "Thread the golden rings. Gather flying fish.", "Outsmart Captain Albatross and reach the festival!"]
   ];
-  const p=pages[storyPage]; const fs=fitTitle(p[0],pw*.84,Math.round(u*.065));
-  ctx.fillStyle="#102a56";ctx.font=`900 ${fs}px -apple-system,system-ui,sans-serif`;ctx.fillText(p[0],W/2,y+ph*.34);
-  ctx.font=`700 ${Math.round(u*.028)}px -apple-system,system-ui,sans-serif`;ctx.fillStyle="#28466d";ctx.fillText(p[1],W/2,y+ph*.52);ctx.fillText(p[2],W/2,y+ph*.62);
-  ctx.fillStyle="#ff7a45";roundedPanel(W/2-u*.16,y+ph*.78,u*.32,u*.065,u*.033,"#ff7a45");ctx.fillStyle="#fff";ctx.font=`900 ${Math.round(u*.026)}px -apple-system,system-ui,sans-serif`;ctx.fillText(storyPage===2?"OPEN FLIGHT SCHOOL →":"TURN THE PAGE →",W/2,y+ph*.812);
+  // left: illustrated inset for this page
+  const img = ASSETS.story && ASSETS.story[storyPage];
+  const ix = x+pw*.05, iy = y+ph*.18, iw = pw*.42, ih = iw*0.75, ir = Math.min(iw,ih)*.07;
+  if (img && img.ok) {
+    drawImageCoverRect(img, ix, iy, iw, ih, ir);
+    ctx.strokeStyle="#102a56";ctx.lineWidth=Math.max(2,u*.006);roundRect(ix,iy,iw,ih,ir);ctx.stroke();
+  }
+  // right: text column
+  const p=pages[storyPage], rx = x+pw*.72, rw = pw*.48;
+  ctx.textAlign="center";
+  const fs=fitTitle(p[0],rw,Math.round(u*.052));
+  ctx.fillStyle="#102a56";ctx.font=`900 ${fs}px -apple-system,system-ui,sans-serif`;ctx.fillText(p[0],rx,y+ph*.33);
+  ctx.font=`700 ${Math.round(u*.025)}px -apple-system,system-ui,sans-serif`;ctx.fillStyle="#28466d";ctx.fillText(p[1],rx,y+ph*.49);ctx.fillText(p[2],rx,y+ph*.60);
+  ctx.fillStyle="#ff7a45";roundedPanel(W/2-u*.18,y+ph*.84,u*.36,u*.07,u*.035,"#ff7a45");ctx.fillStyle="#fff";ctx.font=`900 ${Math.round(u*.026)}px -apple-system,system-ui,sans-serif`;ctx.fillText(storyPage===2?"OPEN FLIGHT SCHOOL →":"TURN THE PAGE →",W/2,y+ph*.876);
   ctx.restore();
+}
+function drawTitleScreen() {
+  // hero key-art backdrop + a soft scrim so text stays readable
+  if (ASSETS.titleHero && ASSETS.titleHero.ok) drawCoverImage(ASSETS.titleHero);
+  else skyGradient("#4fb6f5", "#9fd8fb");
+  ctx.fillStyle = "rgba(8,22,48,0.26)"; ctx.fillRect(0, 0, W, H);
+  // wordmark, top-center
+  if (ASSETS.wordmark && ASSETS.wordmark.ok) {
+    const ww = Math.min(W * 0.50, H * 0.95), wh = ww * (ASSETS.wordmark.height / ASSETS.wordmark.width);
+    ctx.drawImage(ASSETS.wordmark, (W - ww) / 2, H * 0.05, ww, wh);
+  }
+  // instruction block, between the wordmark and the bottom kit/map cards
+  const u = Math.min(H, W * 0.72), bw = Math.min(W * 0.66, u * 1.2), bh = u * 0.30;
+  const bx = (W - bw) / 2, by = H * 0.42;
+  roundedPanel(bx, by, bw, bh, u * 0.04, "rgba(8,24,55,0.52)", "rgba(246,251,255,0.32)");
+  ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = Math.max(2, H * 0.006); ctx.strokeStyle = "rgba(0,0,0,0.5)";
+  const lines = [
+    ["Hold to climb, release to dive", "#f6fbff", 0.040],
+    ["Finish missions to earn badges + unlock kits", "#7fd0ff", 0.031],
+    ["Tap / Click / Spacebar to start", "#ffd34d", 0.040],
+  ];
+  let y = by + bh * 0.27;
+  for (const [t, c, s] of lines) {
+    const fs = Math.round(H * s); ctx.font = `800 ${fs}px -apple-system, system-ui, sans-serif`;
+    ctx.fillStyle = c; ctx.strokeText(t, W / 2, y); ctx.fillText(t, W / 2, y);
+    y += bh * 0.26;
+  }
+  if (best > 0) { ctx.fillStyle = "#fff"; ctx.font = `700 ${Math.round(H * 0.03)}px -apple-system, system-ui, sans-serif`; ctx.fillText("Best: " + best, W / 2, by + bh * 0.95); }
+  ctx.restore();
+  drawFlightKitCard(); drawJourneyMap(true);
 }
 function drawTutorial() {
   if (state !== STATE.PLAYING || tutorialStep >= 3 && tutorialT <= 0) return;
@@ -1706,19 +1831,12 @@ function frame(now) {
 
   if(nearMissT>0&&!reducedMotion){ctx.save();ctx.globalAlpha=nearMissT*.5;ctx.strokeStyle="#ff7a45";ctx.lineWidth=H*.035;ctx.strokeRect(0,0,W,H);ctx.restore();}
 
-  if (state === STATE.PLAYING) { drawScore(); drawMissionHud(); drawBanner(); drawBossHud(); drawBossAmmo(); drawTutorial(); drawDirectionControls(); if(mapT>0)drawJourneyMap(false); }
+  if (state === STATE.PLAYING) { drawScore(); drawMissionHud(); drawBossEntrance(); drawBanner(); drawBossHud(); drawBossAmmo(); drawTutorial(); drawDirectionControls(); if(mapT>0)drawJourneyMap(false); }
   else if (state === STATE.STORY) {
     drawStoryPanel();
   }
   else if (state === STATE.READY) {
-    panel("Flight School", [
-      { text: "Hold to climb, release to dive" },
-      { text: "Steer with ← → or the on-screen arrows" },
-      { text: "Finish flight missions to earn badges + unlock kits", color: "#7fd0ff" },
-      { text: "Tap right / Click / Spacebar to start", color: "#ffd34d" },
-      { text: best > 0 ? "Best: " + best : "" },
-    ]);
-    drawFlightKitCard(); drawJourneyMap(true);
+    drawTitleScreen();
   } else if (state === STATE.WIN) {
     drawScore();
     panel("YOU MADE IT!", [
