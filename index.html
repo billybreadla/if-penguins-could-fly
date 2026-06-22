@@ -3,7 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#102a56" />
 <title>If Penguins Could Fly</title>
+<link rel="icon" href="images/heropenguin.png" />
 <style>
   html, body {
     margin: 0; padding: 0; height: 100%; overflow: hidden;
@@ -16,7 +18,7 @@
 </style>
 </head>
 <body>
-<canvas id="game"></canvas>
+<canvas id="game" role="application" aria-label="If Penguins Could Fly. Hold to climb and release to dive through the adventure."></canvas>
 <script>
 "use strict";
 
@@ -40,6 +42,11 @@ const CONFIG = {
   drag:        2.2,    // air resistance: higher = more glide/float, less snappy fall
   maxFall:     0.78,   // terminal dive speed
   maxClimb:    0.82,   // top climb speed
+  sideAccel:   1.75,   // left/right steering acceleration
+  sideDrag:    4.2,    // steering settles quickly when released
+  maxSide:     0.48,   // maximum horizontal speed
+  playerMinX:  0.12,   // safe steering bounds
+  playerMaxX:  0.62,
 
   // --- Ring scrolling / difficulty ---
   startSpeed:  0.42,   // starting scroll speed (screen-heights / sec)
@@ -77,7 +84,12 @@ const CONFIG = {
   // --- boss battle ---
   bossAt:         600,  // score that triggers boss 1
   bossDuration:  32,    // seconds you must survive before boss 1 goes down
-  boss2Span:      800,  // extra points after Level 2 starts before the meaner boss 2 appears
+  boss2Span:     1500,  // longer hectic ring run after boss 1
+  boss3Span:     1200,  // final approach after the gun deck
+  level2SpeedCap: 0.98, // keep the side-scroll exciting without becoming a blur
+  level3SpeedCap: 1.02,
+  boss2EntryTime:  3.4, // long readable entrance before the Dreadnought becomes active
+  boss2FirstShot:  3.5, // guaranteed escape time after the entrance
 };
 
 /* Ring geometry, measured from the art (rings.png). One consistent frame so
@@ -109,7 +121,7 @@ const BIOMES = [
 const DUSTY = { wash: [202,150,82, 0.42], dark: 0.06 };
 
 /* ---- Asset loading: pull from /images/, fall back to drawn shapes ---- */
-const ASSET_VER = 8;   // bump when art files change so browsers don't serve a stale cached copy
+const ASSET_VER = 10;  // webp diet: every sprite/atlas to webp (9.1MB -> 1.4MB)
 function loadImg(path) {
   const img = new Image();
   img.ok = false;
@@ -118,19 +130,47 @@ function loadImg(path) {
   img.src = path + (path.indexOf("?") < 0 ? "?v=" + ASSET_VER : "");
   return img;
 }
-function loadImgs(prefix, n) { const a = []; for (let i = 0; i < n; i++) a.push(loadImg(`images/${prefix}${i}.png`)); return a; }
+function loadImgs(prefix, n) { const a = []; for (let i = 0; i < n; i++) a.push(loadImg(`images/${prefix}${i}.webp`)); return a; }
 const ASSETS = {
   bg:     loadImg("images/background.webp"),
-  player: loadImg("images/heropenguin.png"),
+  player: loadImg("images/heropenguin.webp"),
   rings:  loadImg("images/rings.webp"),
   boss:   loadImg("images/boss.webp"),
   boss2:  loadImg("images/boss2.webp"),    // the Dreadnought mothership (boss 2)
-  bullet: loadImg("images/bullet.png"),
+  gunDeck: loadImg("images/gun-deck-v4.webp"),
+  gantry: loadImg("images/boss-gantry-v4.webp"),
+  bullet: loadImg("images/bullet.webp"),
   panic:  loadImgs("penguin_panic_", 3),  // panicked penguin variants (shown near danger)
   fish:   loadImgs("fish_", 7),    // fish_0..6 (1 + 6 = fancy/rare worth more)
   parts:  loadImgs("part_", 5),    // ship chunks that fly off the boss
   clouds: loadImgs("cloud_", 9),   // cloud_0 lightest → cloud_8 darkest
+  adventure: loadImg("images/powerups-obstacle-v2.webp"), // matching power-ups + albatross atlas
+  hazards: loadImg("images/hazards-v3.webp"),
+  missions: loadImg("images/missions-v3.webp"),
 };
+const ADVENTURE_FRAMES = {
+  star:   { x: 0, w: 434 }, magnet: { x: 434, w: 434 }, slow: { x: 868, w: 434 },
+  shield: { x: 1270, w: 345 }, bird: { x: 1640, w: 532 },
+};
+const HAZARD_FRAMES = {
+  storm:{x:0,w:380}, balloon:{x:410,w:330}, snowball:{x:780,w:330}, seal:{x:1145,w:390}, ufo:{x:1600,w:380},
+};
+const MISSION_FRAMES = {
+  rescue:{x:0,w:385}, map:{x:410,w:330}, ice:{x:790,w:360}, badge:{x:1200,w:350}, festival:{x:1600,w:380},
+};
+const MISSIONS = [
+  { key: "rings", label: "Thread 5 golden rings", goal: 5 },
+  { key: "fish", label: "Catch 10 flying fish", goal: 10 },
+  { key: "perfect", label: "Nail 3 perfect rings", goal: 3 },
+  { key: "map", label: "Find 3 map pieces", goal: 3 },
+  { key: "rescue", label: "Rescue 2 lost pilots", goal: 2 },
+];
+const FLIGHT_KITS = [
+  { name: "Classic", need: 0, scarf: "#e94236", scarf2: "#ff9b45", trail: "#ffffff" },
+  { name: "Sunset", need: 2, scarf: "#ff7a45", scarf2: "#ffd34d", trail: "#ffb36b" },
+  { name: "Aurora", need: 5, scarf: "#47e0c1", scarf2: "#7fd0ff", trail: "#65f0d0" },
+  { name: "Midnight", need: 9, scarf: "#7652b8", scarf2: "#c49cff", trail: "#a99cff" },
+];
 // fancy fish (clownfish + rainbow) are rarer and worth bonus points
 const FISH_RARE = { 1: 15, 6: 12 };   // index → point value; others use CONFIG.fishValue
 
@@ -216,12 +256,14 @@ function startMusic() { if (!musicTimer) musicTimer = setInterval(musicTick, 205
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 let W = 0, H = 0, DPR = 1;
+let isPortrait = false;
 function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2);
   W = window.innerWidth; H = window.innerHeight;
   canvas.width = Math.floor(W * DPR); canvas.height = Math.floor(H * DPR);
   canvas.style.width = W + "px"; canvas.style.height = H + "px";
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  isPortrait = W / H < 0.82;
   initAmbient();
 }
 window.addEventListener("resize", resize);
@@ -232,11 +274,20 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const lerp = (a, b, t) => a + (b - a) * t;
 
 /* ------------------------------ Game state ---------------------------- */
-const STATE = { READY: 0, PLAYING: 1, OVER: 2, WIN: 3 };
-let state = STATE.READY;
+const STATE = { STORY: 0, READY: 1, PLAYING: 2, OVER: 3, WIN: 4 };
+// Show the flight-log story only the first time; returning pilots skip straight
+// to Flight School (they can replay it after clearing the game's storage).
+let state = localStorage.getItem("ipcf_story_seen") ? STATE.READY : STATE.STORY;
+let storyPage = 0;
+let tutorialStep = 0, tutorialT = 0;
 
 let player, rings, fish, powerups, birds, gusts, particles, texts;
+let missionItems, friendlyShots;
 let speed, score, passed, best, bgX, holding, shakeT, propAngle;
+let steeringLeft = false, steeringRight = false;
+let leftTouchId = null, rightTouchId = null;
+const flightTouchIds = new Set();
+const touchCapable = (navigator.maxTouchPoints || 0) > 0 || "ontouchstart" in window;
 let combo, lastScoreT;
 let starT, magnetT, slowT, graceT, hasShield;
 let trailAcc, birdCooldown, gustCooldown, pairNext, nextSpacing, lastGapY;
@@ -245,8 +296,15 @@ let arena, banner, bannerT, overAt = 0;
 let bossActive, bossBeaten, bossPhase, boss, shots, bossT, bossShootCd, bossPartsThrown, diedAtBoss;
 let level, nextBossAt, speedCap, diedAtBossLevel;
 let panicT, panicIdx;
+let perfectStreak = 0, perfectTotal = 0, nearMissT = 0;
+let missionIndex = 0, missionProgress = 0, missionCompleteT = 0;
+let mapT = 0, bossAmmo = 0, bossSupplyCd = 0;
 
 best = parseInt(localStorage.getItem("ipcf_best") || "0", 10) || 0;
+let badges = parseInt(localStorage.getItem("ipcf_badges") || "0", 10) || 0;
+let selectedKit = clamp(parseInt(localStorage.getItem("ipcf_kit") || "0", 10) || 0, 0, FLIGHT_KITS.length - 1);
+if (badges < FLIGHT_KITS[selectedKit].need) selectedKit = 0;
+const reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /* ambient particle pools (created on resize) */
 let stars = [], flakes = [];
@@ -258,16 +316,22 @@ function initAmbient() {
 }
 
 function reset() {
-  player = { x: W * CONFIG.playerX, y: H * 0.45, vy: 0, angle: 0 };
+  player = { x: W * CONFIG.playerX, y: H * 0.45, vx: 0, vy: 0, angle: 0 };
   rings = []; fish = []; powerups = []; birds = []; gusts = []; particles = []; texts = [];
+  missionItems = []; friendlyShots = [];
   speed = CONFIG.startSpeed;
   score = 0; passed = 0; bgX = 0; holding = false; shakeT = 0; propAngle = 0;
+  steeringLeft = steeringRight = false; leftTouchId = rightTouchId = null; flightTouchIds.clear();
   combo = 0; lastScoreT = -99;
   starT = magnetT = slowT = graceT = 0; hasShield = false;
   bossActive = false; bossBeaten = false; bossPhase = 0; boss = null; shots = []; bossT = 0; bossShootCd = 0;
   bossPartsThrown = 0; diedAtBoss = false;
   level = 1; nextBossAt = CONFIG.bossAt; speedCap = CONFIG.maxSpeed; diedAtBossLevel = 1;
   panicT = 0; panicIdx = 0;
+  tutorialStep = 0; tutorialT = 0;
+  perfectStreak = 0; perfectTotal = 0; nearMissT = 0;
+  missionIndex = 0; missionProgress = 0; missionCompleteT = 0; mapT = 0;
+  bossAmmo = 0; bossSupplyCd = 3.5;
   trailAcc = 0; birdCooldown = H * 2; gustCooldown = H * 1.2;
   pairNext = false; nextSpacing = CONFIG.ringSpacing; lastGapY = 0.5;
   arena = 1;
@@ -275,7 +339,19 @@ function reset() {
   washCur = BIOMES[0].wash.slice(); darkCur = BIOMES[0].dark; starAmt = 0; snowAmt = 0; dustAmt = 0;
   lastBiome = 0; banner = ""; bannerT = 0;
   let x = W + W * 0.2;
-  for (let i = 0; i < 3; i++) { rings.push(makeRing(x)); x += H * CONFIG.ringSpacing; }
+  for (let i = 0; i < 3; i++) {
+    const r = makeRing(x);
+    if (i === 0) r.baseCy = r.cy = H * 0.50;
+    if (i === 1) {
+      r.baseCy = r.cy = H * 0.42;
+      spawnFishLine(r.x, r.cy, H * 0.025);
+    }
+    if (i === 2) {
+      r.baseCy = r.cy = H * 0.58;
+      powerups.push({ x: r.x, y: r.cy, type: "shield", p: 0 });
+    }
+    rings.push(r); x += H * CONFIG.ringSpacing;
+  }
 }
 
 function makeRing(x) {
@@ -327,6 +403,24 @@ function attachItems(r) {
   const holeHalf = (H * CONFIG.ringHeight * RING.holeFrac) / 2;
   if (Math.random() < 0.72) spawnFishLine(r.x, r.cy, holeHalf * 0.55);
   maybeSpawnPower(r.x + H * CONFIG.ringSpacing * 0.5, r.cy + (Math.random() * 2 - 1) * H * 0.14);
+  const mk = MISSIONS[missionIndex % MISSIONS.length].key;
+  if ((mk === "map" || mk === "rescue") && Math.random() < 0.42) {
+    missionItems.push({ x: r.x + H * CONFIG.ringSpacing * 0.46, y: clamp(r.cy + rand(-0.12, 0.12) * H, H*.18, H*.82), kind: mk, p: rand(0,6.28) });
+  }
+}
+function currentMission() { return MISSIONS[missionIndex % MISSIONS.length]; }
+function haptic(ms) { if (!reducedMotion && navigator.vibrate) navigator.vibrate(ms); }
+function missionEvent(key, amount) {
+  const m = currentMission(); if (!m || m.key !== key) return;
+  missionProgress += amount || 1;
+  if (missionProgress < m.goal) return;
+  badges++; localStorage.setItem("ipcf_badges", String(badges));
+  score += 75; missionCompleteT = 3.0; mapT = 3.4;
+  addText(W*.5, H*.34, "MISSION COMPLETE  +75", "#ffd34d", 1.35);
+  const unlocked=FLIGHT_KITS.find(k=>k.need===badges);if(unlocked&&unlocked.need>0)addText(W*.5,H*.43,`${unlocked.name.toUpperCase()} KIT UNLOCKED!`,"#7fd0ff",1.15);
+  burst("spark", W*.5, H*.38, 26, { color: "#ffd34d", spMax:.8, grav:.2, lifeMax:1 });
+  SFX.power(); haptic([35,30,55]);
+  missionIndex++; missionProgress = 0;
 }
 /* clouds start light and darken as you progress toward the boss (cloud_0..8) */
 function cloudTier() { return clamp(Math.floor(score / 600), 0, ASSETS.clouds.length - 1); }
@@ -336,20 +430,53 @@ function makeGust(x, yf) {
 }
 
 /* ------------------------------- Input -------------------------------- */
-function press() {
+function cycleFlightKit() {
+  const unlocked = FLIGHT_KITS.filter(k => badges >= k.need).length;
+  selectedKit = (selectedKit + 1) % Math.max(1, unlocked);
+  localStorage.setItem("ipcf_kit", String(selectedKit)); SFX.power();
+}
+function fireFriendlyShot() {
+  if (!bossActive || bossAmmo <= 0) return;
+  bossAmmo--;
+  friendlyShots.push({ x: player.x + H*.08, y: player.y, vx: H*1.28, r: H*.028, p: 0 });
+  SFX.shoot(); haptic(18);
+}
+function directionButtons() {
+  const r=H*.066, cy=H*.82;
+  return { left:{x:H*.095,y:cy,r}, right:{x:H*.245,y:cy,r} };
+}
+function directionHit(px,py) {
+  const d=directionButtons();
+  if(Math.hypot(px-d.left.x,py-d.left.y)<=d.left.r*1.25)return "left";
+  if(Math.hypot(px-d.right.x,py-d.right.y)<=d.right.r*1.25)return "right";
+  return null;
+}
+function continueBossButtonRect(){const w=Math.min(W*.42,H*.62),h=H*.085;return{x:(W-w)/2,y:H*.68,w,h};}
+function continueBossHit(px,py){const b=continueBossButtonRect();return px>=b.x&&px<=b.x+b.w&&py>=b.y&&py<=b.y+b.h;}
+function continueBoss() {
+  const retryLevel=diedAtBossLevel; // preserve this before reset() restores level one
+  reset();
+  if(retryLevel>=3){level=3;arena=4;speedCap=CONFIG.level3SpeedCap;speed=CONFIG.startSpeed*1.55;score=CONFIG.bossAt+CONFIG.boss2Span+CONFIG.boss3Span;}
+  else if(retryLevel>=2){level=2;arena=3;speedCap=CONFIG.level2SpeedCap;speed=CONFIG.startSpeed*1.45;score=CONFIG.bossAt+CONFIG.boss2Span;}
+  else {level=1;score=CONFIG.bossAt;}
+  state=STATE.PLAYING;startBoss(retryLevel);
+}
+function press(px, py) {
   audioInit();
-  if (state === STATE.READY) { state = STATE.PLAYING; holding = true; SFX.flap(); }
-  else if (state === STATE.PLAYING) { holding = true; SFX.flap(); }
+  if (isPortrait) return;
+  if (state === STATE.STORY) {
+    storyPage++;
+    if (storyPage >= 3) { storyPage = 0; state = STATE.READY; localStorage.setItem("ipcf_story_seen", "1"); }
+  }
+  else if (state === STATE.READY) {
+    if (px != null && px < W*.34 && py > H*.66) { cycleFlightKit(); return; }
+    state = STATE.PLAYING; holding = true; tutorialT = 5; SFX.flap();
+  }
+  else if (state === STATE.PLAYING) { if (bossAmmo > 0) fireFriendlyShot(); holding = true; SFX.flap(); }
   else if (state === STATE.WIN && performance.now() - overAt > 350) { reset(); state = STATE.READY; }
   else if (state === STATE.OVER && performance.now() - overAt > 350) {
-    if (diedAtBoss) {                                       // retry straight at the boss you died on
-      reset();
-      if (diedAtBossLevel >= 2) {
-        level = 2; arena = 3; speedCap = Math.min(1.25, CONFIG.maxSpeed + 0.18);
-        speed = CONFIG.startSpeed * 1.8; score = CONFIG.bossAt + CONFIG.boss2Span;
-      } else { score = CONFIG.bossAt; }
-      state = STATE.PLAYING; startBoss(level);
-    } else { reset(); state = STATE.READY; }
+    if (diedAtBoss) { if(px==null||continueBossHit(px,py))continueBoss(); }
+    else { reset(); state = STATE.READY; }
   }
 }
 function release() { holding = false; }
@@ -367,23 +494,34 @@ function handleMuteTap(px, py) {
   return true;
 }
 
-canvas.addEventListener("mousedown", (e) => { e.preventDefault(); if (handleMuteTap(e.clientX, e.clientY)) return; press(); });
+canvas.addEventListener("mousedown", (e) => { e.preventDefault(); if (handleMuteTap(e.clientX, e.clientY)) return; press(e.clientX, e.clientY); });
 window.addEventListener("mouseup", () => release());
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
-  const t = e.changedTouches[0];
-  if (t && handleMuteTap(t.clientX, t.clientY)) return;
-  press();
+  for(const t of e.changedTouches){
+    if(handleMuteTap(t.clientX,t.clientY))continue;
+    const dir=state===STATE.PLAYING?directionHit(t.clientX,t.clientY):null;
+    if(dir==="left"){leftTouchId=t.identifier;steeringLeft=true;continue;}
+    if(dir==="right"){rightTouchId=t.identifier;steeringRight=true;continue;}
+    flightTouchIds.add(t.identifier);press(t.clientX,t.clientY);
+  }
 }, { passive: false });
-window.addEventListener("touchend", (e) => { e.preventDefault(); release(); }, { passive: false });
+function endTouches(e){e.preventDefault();for(const t of e.changedTouches){if(t.identifier===leftTouchId){leftTouchId=null;steeringLeft=false;}if(t.identifier===rightTouchId){rightTouchId=null;steeringRight=false;}flightTouchIds.delete(t.identifier);}if(!flightTouchIds.size)release();}
+window.addEventListener("touchend",endTouches,{passive:false});
+window.addEventListener("touchcancel",endTouches,{passive:false});
 window.addEventListener("keydown", (e) => {
   if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); if (!e.repeat) press(); }
+  if(e.code==="ArrowLeft"){e.preventDefault();steeringLeft=true;}
+  if(e.code==="ArrowRight"){e.preventDefault();steeringRight=true;}
   if (e.code === "KeyM") { muted = !muted; }
+  if (e.code === "KeyC" && state === STATE.READY) cycleFlightKit();
   // R on the game-over screen = full restart from zero (vs. tap = retry the boss)
   if (e.code === "KeyR" && state === STATE.OVER) { reset(); state = STATE.READY; }
 });
 window.addEventListener("keyup", (e) => {
   if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); release(); }
+  if(e.code==="ArrowLeft")steeringLeft=false;
+  if(e.code==="ArrowRight")steeringRight=false;
 });
 // belt-and-suspenders: any interaction anywhere keeps the audio context awake
 ["pointerdown", "touchstart", "keydown"].forEach((ev) =>
@@ -452,12 +590,20 @@ function update(dt) {
     if (tx.life <= 0) texts.splice(i, 1);
   }
 
-  if (state === STATE.READY) {
+  if (state === STATE.STORY || state === STATE.READY) {
     player.y = H * 0.45 + Math.sin(performance.now() / 350) * H * 0.02;
     player.angle = Math.sin(performance.now() / 350) * 0.06;
     return;
   }
   if (state !== STATE.PLAYING) return;
+
+  tutorialT = Math.max(0, tutorialT - dt);
+  missionCompleteT = Math.max(0, missionCompleteT - dt);
+  mapT = Math.max(0, mapT - dt);
+  nearMissT = Math.max(0, nearMissT - dt);
+  if (passed >= 3) tutorialStep = 3;
+  else if (passed >= 2) tutorialStep = 2;
+  else if (passed >= 1) tutorialStep = 1;
 
   // power-up timers
   if (starT > 0) { starT -= dt; if (starT <= 0) graceT = CONFIG.starGrace; }  // ⭐ ends → grace window begins
@@ -471,6 +617,14 @@ function update(dt) {
   player.vy -= player.vy * CONFIG.drag * dt;   // air resistance: bleeds off momentum so it glides & floats at the top of each tap
   player.vy = clamp(player.vy, -CONFIG.maxClimb * H, CONFIG.maxFall * H);
   player.y += player.vy * dt;
+  const sideInput=(steeringRight?1:0)-(steeringLeft?1:0);
+  player.vx += sideInput*CONFIG.sideAccel*H*dt;
+  player.vx -= player.vx*CONFIG.sideDrag*dt;
+  player.vx=clamp(player.vx,-CONFIG.maxSide*H,CONFIG.maxSide*H);
+  player.x+=player.vx*dt;
+  const minPX=W*CONFIG.playerMinX,maxPX=W*CONFIG.playerMaxX;
+  if(player.x<minPX){player.x=minPX;player.vx=Math.max(0,player.vx);}
+  if(player.x>maxPX){player.x=maxPX;player.vx=Math.min(0,player.vx);}
   const targetAngle = clamp(player.vy / (CONFIG.maxFall * H) * 0.7, -0.5, 0.7);
   player.angle += (targetAngle - player.angle) * Math.min(1, dt * 10);
 
@@ -482,13 +636,13 @@ function update(dt) {
     particles.push({
       kind: "puff", x: player.x - drawW * 0.42, y: player.y + drawH * 0.12,
       vx: -speed * H * 0.25 * ws * starRush, vy: rand(-0.02, 0.02) * H,
-      life: 0.55, max: 0.55, size: H * 0.018, grow: H * 0.05, color: "#fff",
+      life: 0.55, max: 0.55, size: H * 0.018, grow: H * 0.05, color: FLIGHT_KITS[selectedKit].trail,
     });
   }
 
   const worldDx = speed * H * dt * ws * starRush;
   const moveLeft = (arr) => { for (const o of arr) o.x -= worldDx; };
-  moveLeft(rings); moveLeft(fish); moveLeft(powerups); moveLeft(gusts);
+  moveLeft(rings); moveLeft(fish); moveLeft(powerups); moveLeft(gusts); moveLeft(missionItems);
 
   // player hit radius (used by boss shots; rings compute their own below)
   const phhAll = (drawW * (616 / 940) * CONFIG.hitScale) / 2;
@@ -496,6 +650,11 @@ function update(dt) {
   // ---- boss battle: takes over the arena at the threshold score ----
   if (!bossActive && !bossBeaten && score >= nextBossAt) startBoss(level);
   if (bossActive) {
+    bossSupplyCd -= dt;
+    if (bossSupplyCd <= 0 && missionItems.filter(i => i.kind === "ice").length < 2) {
+      missionItems.push({ x: W + H*.1, y: rand(.22,.78)*H, kind: "ice", p: rand(0,6.28) });
+      bossSupplyCd = rand(4.2,6.2);
+    }
     updateBoss(dt, ws, phhAll);
     if (state !== STATE.PLAYING) return;   // a boss shot may have ended the run
   }
@@ -515,7 +674,7 @@ function update(dt) {
 
   // recycle rings; spawn new ones only in arena 1 (variable spacing makes pairs)
   while (rings.length && rings[0].x < -W * 0.35) rings.shift();
-  if ((arena === 1 || arena === 3) && !bossActive) {
+  if ((arena === 1 || arena === 3 || arena === 4) && !bossActive) {
     const lastX = rings.length ? rings[rings.length - 1].x : W;
     if (lastX < W + H * nextSpacing) {
       const r = makeRing(lastX + H * nextSpacing);
@@ -563,8 +722,21 @@ function update(dt) {
       r.scored = true;
       if (player.y > holeTop && player.y < holeBot) {
         passed++;
+        if (passed <= 3) tutorialT = 4.0;
         speed = Math.min(speedCap, speed + CONFIG.speedRamp);
         addScore(1, player.x, player.y - drawH * 0.5);
+        missionEvent("rings", 1);
+        const centerError = Math.abs(player.y - r.cy);
+        if (centerError < holeHalf * 0.18) {
+          perfectStreak++; perfectTotal++;
+          addScore(2 + Math.min(perfectStreak, 5), player.x, player.y - drawH*.78);
+          addText(player.x, player.y + drawH*.62, perfectStreak > 1 ? `PERFECT x${perfectStreak}` : "PERFECT!", "#ffd34d", 1.25);
+          burst("spark", player.x, player.y, 18, { color:"#ffd34d", spMax:.65, grav:.1, lifeMax:.7 });
+          missionEvent("perfect", 1); haptic(22);
+        } else {
+          perfectStreak = 0;
+          if (centerError > holeHalf*.76) { nearMissT = .55; addText(player.x, player.y, "CLOSE CALL!", "#ff9b45", 1.05); }
+        }
         SFX.ring();
         if (arena === 1) checkBiome();
       }
@@ -595,9 +767,22 @@ function update(dt) {
       fish.splice(i, 1);
       const val = FISH_RARE[f.type] || CONFIG.fishValue;
       addScore(val, f.x, f.y);
+      missionEvent("fish", 1);
       const rare = !!FISH_RARE[f.type];
       burst("spark", f.x, f.y, rare ? 12 : 7, { color: rare ? "#7fffd4" : "#ffd34d", spMax: rare ? 0.6 : 0.4, grav: 0.3, lifeMax: 0.5 });
       SFX.fish();
+    }
+  }
+
+  // mission collectibles: map fragments, parachuting pilots, and boss ice-fish ammo
+  for (let i = missionItems.length - 1; i >= 0; i--) {
+    const it = missionItems[i]; it.p += dt * 2.5;
+    if (it.x < -W*.12) { missionItems.splice(i,1); continue; }
+    if (Math.hypot(player.x-it.x, player.y-it.y) < phh + H*.055) {
+      missionItems.splice(i,1);
+      if (it.kind === "ice") { bossAmmo = Math.min(3,bossAmmo+1); addText(it.x,it.y,"ICE SHOT READY!","#7fd0ff",1.12); }
+      else { missionEvent(it.kind,1); addScore(it.kind === "rescue" ? 25 : 15,it.x,it.y); }
+      burst("spark",it.x,it.y,16,{color:it.kind==="ice"?"#7fd0ff":"#ffd34d",spMax:.6,grav:.15,lifeMax:.7});SFX.power();haptic(18);
     }
   }
 
@@ -633,20 +818,30 @@ function update(dt) {
     }
   }
 
-  // eagles: spawn, move, collide (arena 1 only)
+  // Each world introduces a troublemaker with its own movement personality.
   birdCooldown -= worldDx;
-  if ((arena === 1 || arena === 3) && !bossActive && passed >= 8 && birdCooldown <= 0) {
-    birds.push({ x: W + H * 0.12, y: rand(0.2, 0.8) * H, p: rand(0, 6.28), baseY: 0 });
+  if (!bossActive && passed >= 8 && birdCooldown <= 0) {
+    const world = activeWorld();
+    const kinds = ["albatross","balloon","storm","snowball","ufo","seal","storm","ufo"];
+    const kind = kinds[world] || "albatross";
+    birds.push({ kind, x: W + H * 0.14, y: rand(0.2, 0.8) * H, p: rand(0, 6.28), baseY: 0, near:false });
     birds[birds.length - 1].baseY = birds[birds.length - 1].y;
     birdCooldown = H * rand(1.3, 2.6);
   }
-  const birdR = H * 0.045;
   for (let i = birds.length - 1; i >= 0; i--) {
     const b = birds[i];
-    b.x -= speed * H * 1.18 * dt * ws * starRush;
-    b.y = b.baseY + Math.sin(tnow * 3 + b.p) * H * 0.04;
+    const factor = b.kind === "balloon" ? .72 : b.kind === "snowball" ? 1.42 : b.kind === "ufo" ? 1.28 : 1.08;
+    const r = H * (b.kind === "seal" ? .06 : b.kind === "storm" ? .058 : b.kind === "balloon" ? .052 : .047);
+    b.x -= speed * H * factor * dt * ws * starRush;
+    if (b.kind === "storm") b.baseY += clamp(player.y-b.baseY,-H*.12,H*.12)*dt*.32;
+    if (b.kind === "snowball") b.baseY += Math.sin(b.p)*H*.045*dt;
+    const wave = b.kind === "ufo" ? .11 : b.kind === "seal" ? .07 : .04;
+    const freq = b.kind === "ufo" ? 5.2 : b.kind === "balloon" ? 1.4 : 3;
+    b.y = b.baseY + Math.sin(tnow * freq + b.p) * H * wave;
     if (b.x < -W * 0.15) { birds.splice(i, 1); continue; }
-    if (Math.hypot(player.x - b.x, player.y - b.y) < phh + birdR) {
+    const bd = Math.hypot(player.x-b.x,player.y-b.y);
+    if (!b.near && b.x < player.x && bd < phh+r+H*.08) { b.near=true; addScore(5,player.x,player.y); addText(player.x,player.y-H*.07,"NEAR MISS!","#ff9b45",1.05); }
+    if (bd < phh + r) {
       if (inv || hasShield) { if (!inv) consumeShield(b.x, b.y); birds.splice(i, 1); smashFx(b.x, b.y); }
       else { gameOver(); return; }
     }
@@ -677,7 +872,7 @@ function smashFx(x, y) {
 
 function checkBiome() {
   const idx = Math.floor(passed / CONFIG.biomeLen) % BIOMES.length;
-  if (idx !== lastBiome) { lastBiome = idx; banner = BIOMES[idx].name; bannerT = 2.2; }
+  if (idx !== lastBiome) { lastBiome = idx; banner = BIOMES[idx].name; bannerT = 2.2; mapT = 3.5; }
 }
 
 /* =============================== BOSS BATTLE ===========================
@@ -688,23 +883,28 @@ function checkBiome() {
 function startBoss(lvl) {
   lvl = lvl || 1;
   bossActive = true; bossPhase = 1; bossT = 0; bossShootCd = 0; bossPartsThrown = 0;
-  shots = [];
-  rings = []; fish = []; powerups = []; birds = []; gusts = [];   // clear the arena
-  const big = lvl >= 2;
-  const spr = big ? ASSETS.boss2 : ASSETS.boss;
-  const aspect = (spr && spr.ok) ? spr.height / spr.width : (big ? 0.668 : 0.557);
-  const dw = H * (big ? 0.92 : 0.56);
+  shots = []; friendlyShots = []; bossAmmo = 0; bossSupplyCd = 2.4;
+  rings = []; fish = []; powerups = []; birds = []; gusts = []; missionItems = []; // clear the arena
+  const segment = lvl === 2, finalBoss = lvl >= 3, big = lvl >= 2;
+  const spr=segment?ASSETS.gunDeck:big?ASSETS.boss2:ASSETS.boss;
+  const cropFrac = 1;
+  const aspect = (spr && spr.ok) ? spr.height / (spr.width*cropFrac) : (big ? 0.668/cropFrac : 0.557);
+  const dw = H * (finalBoss ? 1.16 : segment ? .72 : .56);
   const dh = dw * aspect;
-  const sx = W * (big ? 0.50 : 0.68), roamX = W * (big ? 0.82 : 0.68), sy = H * (big ? 0.30 : 0.32);
+  // Boss two begins just beyond the right edge, then glides into its lane.
+  // This leaves the player a readable, empty escape corridor on arrival.
+  const sx = big ? W + dw*.45 : W*.68, roamX = W * (finalBoss ? .83 : segment ? .87 : .68), sy = H * (finalBoss ? .42 : segment ? .40 : .32);
   boss = { x: sx, y: -dh, baseY: sy, roamCx: roamX, roamCy: sy, w: dw, h: dh,
            vy: 0, angle: 0, bob: rand(0, 6.28),
-           enterT: big ? 2.2 : 1.6, charging: false, chargeT: 0, aimX: 0, aimY: 0, smoke: 0,
-           level: lvl, dur: big ? CONFIG.bossDuration + 6 : CONFIG.bossDuration,
-           tele: big ? 0.48 : 0.72, cadence: big ? 0.72 : 1.30,
-           sprite: spr, pipe: !big,
-           muzX: big ? -0.42 : -0.24, muzY: big ? 0.08 : -0.18,
-           muzRx: big ? 0.05 : 0.055, muzRy: big ? 0.07 : 0.11 };
-  banner = big ? "THE DREADNOUGHT DESCENDS!" : "WARNING — THE GUN DROPS DOWN!"; bannerT = 3.2;
+           enterT: finalBoss ? 4.0 : segment ? CONFIG.boss2EntryTime : 1.6,
+           firstShotDelay: finalBoss ? 3.8 : segment ? CONFIG.boss2FirstShot : .9,
+           charging: false, chargeT: 0, aimX: 0, aimY: 0, smoke: 0,
+           level: lvl, dur: finalBoss ? CONFIG.bossDuration+12 : segment ? CONFIG.bossDuration+3 : CONFIG.bossDuration,
+           tele: finalBoss ? .70 : segment ? .84 : .72, cadence: finalBoss ? 1.0 : segment ? 1.16 : 1.30,
+           sprite: spr, pipe: !big, segment, finalBoss, cropFrac,
+           muzX: finalBoss ? -.42 : segment ? -.34 : -.24, muzY: finalBoss ? .08 : segment ? .04 : -.18,
+           muzRx: finalBoss ? .05 : segment ? .08 : .055, muzRy: finalBoss ? .07 : segment ? .13 : .11 };
+  banner = finalBoss ? "THE FULL DREADNOUGHT ARRIVES!" : segment ? "THE GUN DECK BLOCKS THE WAY!" : "WARNING — THE GUN DROPS DOWN!"; bannerT = 3.6;
   shakeT = 0.9; SFX.alarm();
 }
 function bossMuzzle() {   // the firing bore, measured from whichever sprite this boss uses
@@ -715,16 +915,22 @@ function bossWin() {
   bossActive = false; bossPhase = 0; boss = null; shots = [];
   score += 1000 * lvl; addText(W * 0.5, H * 0.42, "+" + (1000 * lvl), "#ffd34d", 1.7);
   shakeT = 0.5; SFX.power();
-  if (lvl >= 2) {                       // final boss down — you beat the game
+  if (lvl >= 3) {                       // the full Dreadnought is the finale
     bossBeaten = true; overAt = performance.now(); state = STATE.WIN;
     if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); }
     return;
-  } else {                              // advance into Level 2: the Storm Front
+  } else if (lvl === 2) {               // the gun deck is down; approach the full ship
+    level = 3; bossBeaten = false; arena = 4;
+    speedCap = CONFIG.level3SpeedCap;
+    speed = Math.min(speed, CONFIG.startSpeed*1.78);
+    nextBossAt = score + CONFIG.boss3Span;
+    banner = "LEVEL 3 — DREADNOUGHT APPROACH!"; bannerT = 4.8; mapT = 4.0;
+  } else {                              // advance into the longer Level 2 ring run
     level = 2; bossBeaten = false; arena = 3;
-    speedCap = Math.min(1.25, CONFIG.maxSpeed + 0.18);
-    speed = Math.max(speed, CONFIG.startSpeed * 1.8);
+    speedCap = CONFIG.level2SpeedCap;
+    speed = Math.min(speed, CONFIG.startSpeed * 1.76);
     nextBossAt = score + CONFIG.boss2Span;
-    banner = "LEVEL 2 — THE STORM FRONT!"; bannerT = 4.5;
+    banner = "LEVEL 2 — THE LONG STORM RUN!"; bannerT = 4.8; mapT = 4.0;
   }
   if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); }
 }
@@ -739,24 +945,28 @@ function throwPart() {   // a chunk of the cruiser breaks off and flies at the p
   shakeT = Math.max(shakeT, 0.28); SFX.boom();
 }
 function fireBoltVolley(frac) {
-  const m = bossMuzzle(), big = boss.level >= 2;
+  const m = bossMuzzle(), big = boss.level >= 2, finalBoss=boss.level>=3;
   let dx = boss.aimX - m.x, dy = boss.aimY - m.y; const d = Math.hypot(dx, dy) || 1; dx /= d; dy /= d;
   let angs;
-  if (big) {                                              // boss 2 is meaner: starts on a fan, ends on a wall
-    if (frac < 0.33) angs = [-0.2, 0, 0.2];
-    else if (frac < 0.66) angs = [-0.42, -0.21, 0, 0.21, 0.42];
-    else angs = [-0.55, -0.33, -0.11, 0.11, 0.33, 0.55];
+  if (finalBoss) {
+    if(frac<.32)angs=[-.26,0,.26];
+    else if(frac<.70)angs=[-.44,-.22,0,.22,.44];
+    else angs=[-.58,-.35,-.12,.12,.35,.58];
+  } else if (big) {                                       // gun deck ramps up gently
+    if (frac < 0.35) angs = [0];
+    else if (frac < 0.72) angs = [-0.30, 0, 0.30];
+    else angs = [-0.48, -0.24, 0, 0.24, 0.48];
   } else {                                                // boss 1 is gentle: at most a wide 3-fan, never a wall
     if (frac < 0.55) angs = [0];                          // single aimed shot for the first half
     else angs = [-0.28, 0, 0.28];                         // wide 3-fan with big gaps to fly through
   }
-  const sp = H * ((big ? 0.72 : 0.5) + (big ? 0.28 : 0.16) * frac), rr = H * (big ? 0.03 : 0.026);
+  const sp=H*((finalBoss ? .67 : big ? .58 : .5)+(finalBoss ? .25 : big ? .18 : .16)*frac),rr=H*(finalBoss ? .03 : big ? .027 : .026);
   for (const a of angs) {
     const ax = dx * Math.cos(a) - dy * Math.sin(a), ay = dx * Math.sin(a) + dy * Math.cos(a);
     shots.push({ x: m.x, y: m.y, vx: ax * sp, vy: ay * sp, r: rr, kind: "bolt" });
   }
-  if (big) {                                              // extra fire from the Dreadnought's underside turrets
-    for (let t = 0; t < 2; t++) {
+  if (big && frac > (finalBoss ? .45 : .76)) {
+    for (let t = 0; t < (finalBoss?2:1); t++) {
       const tx = boss.x + rand(-0.35, 0.3) * boss.w, ty = boss.y + rand(0.16, 0.4) * boss.h;
       let ex = player.x - tx, ey = player.y - ty; const ed = Math.hypot(ex, ey) || 1;
       shots.push({ x: tx, y: ty, vx: ex / ed * sp * 0.8, vy: ey / ed * sp * 0.8, r: rr * 0.9, kind: "bolt" });
@@ -768,21 +978,21 @@ function fireBoltVolley(frac) {
 }
 function updateBoss(dt, ws, phh) {
   const T = boss.dur, now = performance.now();
-  const partMilestones = ASSETS.parts.length * (boss.level >= 2 ? 2 : 1);
+  const partMilestones=ASSETS.parts.length*(boss.level>=3?2:1);
   if (bossPhase === 1) {                                  // ENTRANCE: the cruiser drops into position
     boss.y += (boss.baseY - boss.y) * Math.min(1, dt * 2.2);
     boss.enterT -= dt;
     if (now % 70 < 35) shakeT = Math.max(shakeT, 0.12);
-    if (boss.enterT <= 0) { bossPhase = 2; bossShootCd = 0.7 * boss.cadence; banner = "DODGE AND SURVIVE!"; bannerT = 2.4; }
+    if (boss.enterT <= 0) { bossPhase = 2; bossShootCd = boss.firstShotDelay; banner = boss.level>=2 ? "GET READY — SHE'S MOVING IN!" : "GRAB ICE FISH — TAP TO FIRE!"; bannerT = 3.2; }
   } else if (bossPhase === 2) {                           // FIGHT
     bossT += dt;
     const frac = clamp(bossT / T, 0, 1);
     boss.smoke = frac;
-    const rm = boss.level >= 2 ? 0.45 : 1;                          // the big ship roams less
+    const rm=boss.level>=3 ? .38 : boss.level>=2 ? .58 : 1;
     const tx = boss.roamCx + Math.sin(now / 1700) * W * 0.09 * rm;
     const ty = boss.roamCy + Math.sin(now / 1250 + boss.bob) * H * 0.13 * rm;
     if (boss.level >= 2) {                                          // big ship enters centered, then slides right for dodge room
-      boss.x += (tx - boss.x) * Math.min(1, dt * 1.1);
+      boss.x += (tx - boss.x) * Math.min(1, dt * .72);
       boss.y += (ty - boss.y) * Math.min(1, dt * 1.1);
     } else { boss.x = tx; boss.y = ty; }
     boss.angle = Math.sin(now / 1500) * (boss.level >= 2 ? 0.02 : 0.05);
@@ -793,7 +1003,7 @@ function updateBoss(dt, ws, phh) {
     if (Math.floor(frac * partMilestones) > bossPartsThrown) throwPart();   // shed a part at each milestone
     if (boss.charging) {                                  // telegraph: charge → fire
       boss.chargeT -= dt;
-      if (boss.chargeT <= 0) { boss.charging = false; fireBoltVolley(frac); bossShootCd = (1.0 - 0.5 * frac) * rand(0.85, 1.2) * boss.cadence; }
+      if (boss.chargeT <= 0) { boss.charging = false; fireBoltVolley(frac); bossShootCd = (1.35 - 0.45 * frac) * rand(0.9, 1.15) * boss.cadence; }
     } else {
       bossShootCd -= dt;
       if (bossShootCd <= 0) { boss.charging = true; boss.chargeT = boss.tele; boss.aimX = player.x; boss.aimY = player.y; }
@@ -818,6 +1028,15 @@ function updateBoss(dt, ws, phh) {
       else { gameOver(); return; }
     }
   }
+  for (let i = friendlyShots.length - 1; i >= 0; i--) {
+    const sh = friendlyShots[i]; sh.x += sh.vx * dt; sh.p += dt * 9;
+    if (sh.x > W + H*.12) { friendlyShots.splice(i,1); continue; }
+    if (bossPhase === 2 && Math.abs(sh.x-boss.x) < boss.w*.46 && Math.abs(sh.y-boss.y) < boss.h*.46) {
+      friendlyShots.splice(i,1); bossT = Math.min(T,bossT+3.2);
+      score += 50; addText(boss.x-boss.w*.25,sh.y,"DIRECT HIT  +50","#7fd0ff",1.2);
+      burst("spark",sh.x,sh.y,22,{color:"#7fd0ff",spMax:.9,grav:.1,lifeMax:.8});shakeT=Math.max(shakeT,.34);SFX.boom();haptic([25,20,35]);
+    }
+  }
 }
 
 function updateSky(dt) {
@@ -825,6 +1044,8 @@ function updateSky(dt) {
   let wash, dark, star, snow, dust;
   if (bossActive) {                               // boss fight: stormy, ominous sky
     wash = [60, 14, 34, 0.55]; dark = 0.34; star = 0; snow = 0; dust = 0;
+  } else if (arena === 4) {                       // Level 3: the Dreadnought Approach
+    wash = [18, 15, 58, 0.72]; dark = 0.40; star = 1; snow = 0; dust = 0;
   } else if (arena === 3) {                       // Level 2: the Storm Front
     wash = [40, 30, 72, 0.5]; dark = 0.30; star = 1; snow = 0; dust = 0;
   } else if (arena === 2) {                       // Dusty Hills overrides the sky cycle
@@ -865,17 +1086,68 @@ function updateParticles(dt) {
 }
 
 /* -------------------------------- Draw -------------------------------- */
+function activeWorld() {
+  if (bossActive) return 6;
+  if (arena === 4) return 4;
+  if (arena === 3) return 7;
+  if (arena === 2) return 5;
+  return (state === STATE.PLAYING ? Math.floor(passed / CONFIG.biomeLen) : 0) % BIOMES.length;
+}
+function skyGradient(top, bottom) {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, top); g.addColorStop(1, bottom);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+function mountainLayer(baseY, color, amp, drift) {
+  const off = (bgX * drift) % (W * 0.45);
+  ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(-W * 0.2, H);
+  for (let x = -W * 0.2 - off; x < W * 1.3; x += W * 0.18) {
+    ctx.lineTo(x, baseY); ctx.lineTo(x + W * 0.09, baseY - amp * (0.65 + 0.35 * Math.sin(x * 0.013)));
+    ctx.lineTo(x + W * 0.18, baseY);
+  }
+  ctx.lineTo(W * 1.3, H); ctx.closePath(); ctx.fill();
+}
+function drawStorybookWorld(world) {
+  if (world === 1) { // sunset ocean
+    skyGradient("#65438f", "#ff9b62");
+    ctx.fillStyle = "#ffd45f"; ctx.beginPath(); ctx.arc(W * 0.78, H * 0.25, H * 0.11, 0, 7); ctx.fill();
+    mountainLayer(H * 0.72, "#84506d", H * 0.18, 0.05); mountainLayer(H * 0.80, "#4a4775", H * 0.13, 0.11);
+    ctx.fillStyle = "#315d8c"; ctx.fillRect(0, H * 0.82, W, H * 0.18);
+  } else if (world === 2) { // aurora night
+    skyGradient("#071a46", "#194f72");
+    ctx.strokeStyle = "rgba(93,255,196,.34)"; ctx.lineWidth = H * 0.08; ctx.lineCap = "round";
+    for (let j = 0; j < 3; j++) { ctx.beginPath(); for (let x = -20; x <= W + 20; x += 24) { const y = H * (0.18 + j * 0.07) + Math.sin(x * 0.008 + j + bgX * 0.002) * H * 0.07; x < 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y); } ctx.stroke(); }
+    ctx.fillStyle = "#f6fbff"; ctx.beginPath(); ctx.arc(W * 0.80, H * 0.18, H * 0.07, 0, 7); ctx.fill();
+    mountainLayer(H * 0.79, "#163252", H * 0.22, 0.08); mountainLayer(H * 0.88, "#0d253f", H * 0.17, 0.15);
+  } else if (world === 3) { // snowy peaks
+    skyGradient("#83c9f4", "#e7f8ff");
+    mountainLayer(H * 0.77, "#b9d9ea", H * 0.30, 0.05); mountainLayer(H * 0.90, "#6f9fbd", H * 0.25, 0.12);
+    ctx.fillStyle = "#f6fbff"; ctx.fillRect(0, H * 0.88, W, H * 0.12);
+  } else if (world === 4) { // outer space
+    skyGradient("#07061e", "#17234c");
+    const pg = ctx.createRadialGradient(W*.78,H*.28,0,W*.78,H*.28,H*.18); pg.addColorStop(0,"#ffca6a"); pg.addColorStop(.65,"#ba5fa5"); pg.addColorStop(1,"rgba(85,45,130,0)");
+    ctx.fillStyle=pg; ctx.beginPath(); ctx.arc(W*.78,H*.28,H*.18,0,7); ctx.fill();
+    ctx.strokeStyle="rgba(255,236,190,.7)";ctx.lineWidth=H*.018;ctx.beginPath();ctx.ellipse(W*.78,H*.28,H*.25,H*.055,-.2,0,7);ctx.stroke();
+  } else if (world === 5) { // dusty canyon
+    skyGradient("#d87949", "#f4c47c"); mountainLayer(H*.74,"#a44f3f",H*.23,.06); mountainLayer(H*.88,"#703a37",H*.17,.14);
+  } else if (world >= 6) { // storm and boss skies
+    skyGradient(world === 6 ? "#290f35" : "#172145", "#6c5b8f");
+    mountainLayer(H*.83,"#24233f",H*.17,.09);
+    ctx.strokeStyle="rgba(246,251,255,.22)";ctx.lineWidth=H*.006;for(let i=0;i<8;i++){const x=(i*W*.17+bgX*.4)%(W*1.2);ctx.beginPath();ctx.moveTo(x,-20);ctx.lineTo(x-H*.22,H*.55);ctx.stroke();}
+  }
+}
 function drawBackground() {
-  if (ASSETS.bg.ok) {
+  const world = activeWorld();
+  if (world === 0 && ASSETS.bg.ok) {
     const tileW = H * (ASSETS.bg.width / ASSETS.bg.height);
     let x = bgX % tileW; if (x > 0) x -= tileW;
     for (let dx = x; dx < W; dx += tileW) ctx.drawImage(ASSETS.bg, dx, 0, tileW, H);
-  } else {
+  } else if (world === 0) {
     const g = ctx.createLinearGradient(0, 0, 0, H);
     g.addColorStop(0, "#4fb6f5"); g.addColorStop(0.7, "#9fd8fb");
     g.addColorStop(0.7001, "#7cc36a"); g.addColorStop(1, "#5aa84d");
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-  }
+  } else drawStorybookWorld(world);
   // biome wash + dim
   if (washCur[3] > 0.01) { ctx.fillStyle = `rgba(${washCur[0]|0},${washCur[1]|0},${washCur[2]|0},${washCur[3]})`; ctx.fillRect(0, 0, W, H); }
   if (darkCur > 0.01) { ctx.fillStyle = `rgba(0,0,8,${darkCur})`; ctx.fillRect(0, 0, W, H); }
@@ -935,11 +1207,22 @@ function drawShine(r, ringW, ringH, holeHalf) {
   ctx.restore();
 }
 
-function emoji(ch, x, y, px, rot) {
-  ctx.save(); ctx.translate(x, y); if (rot) ctx.rotate(rot);
-  ctx.font = px + "px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(ch, 0, 0); ctx.restore();
+function drawAdventureSprite(type, x, y, size, rot, alpha) {
+  const img = ASSETS.adventure, f = ADVENTURE_FRAMES[type];
+  if (!img || !img.ok || !f) return false;
+  const sw = f.w, sh = img.height;
+  ctx.save(); ctx.translate(x, y); if (rot) ctx.rotate(rot); ctx.globalAlpha = alpha == null ? 1 : alpha;
+  ctx.drawImage(img, f.x, 0, sw, sh, -size / 2, -size / 2, size, size);
+  ctx.restore(); return true;
 }
+function drawFiveAtlas(img, frame, x, y, size, rot, alpha) {
+  if (!img || !img.ok || !frame) return false;
+  const sw=frame.w, sh=img.height;
+  ctx.save();ctx.translate(x,y);if(rot)ctx.rotate(rot);ctx.globalAlpha=alpha==null?1:alpha;
+  ctx.drawImage(img,frame.x,0,sw,sh,-size/2,-size/2,size,size);ctx.restore();return true;
+}
+function drawMissionSprite(kind,x,y,size,rot,alpha){return drawFiveAtlas(ASSETS.missions,MISSION_FRAMES[kind],x,y,size,rot,alpha);}
+function drawHazardSprite(kind,x,y,size,rot,alpha){return drawFiveAtlas(ASSETS.hazards,HAZARD_FRAMES[kind],x,y,size,rot,alpha);}
 function drawFish() {
   const t = performance.now() / 1000, fw = H * 0.08;
   for (const f of fish) {
@@ -950,11 +1233,10 @@ function drawFish() {
       ctx.save(); ctx.translate(f.x, y); ctx.scale(-1, 1);   // art faces right; flip to swim left
       ctx.drawImage(img, -fw / 2, -h / 2, fw, h); ctx.restore();
     } else {
-      emoji("🐟", f.x, y, H * 0.05);
+      ctx.save();ctx.translate(f.x,y);ctx.fillStyle="#ff9b45";ctx.beginPath();ctx.ellipse(0,0,fw*.34,fw*.20,0,0,7);ctx.fill();ctx.beginPath();ctx.moveTo(fw*.28,0);ctx.lineTo(fw*.58,-fw*.22);ctx.lineTo(fw*.58,fw*.22);ctx.closePath();ctx.fill();ctx.fillStyle="#102a56";ctx.beginPath();ctx.arc(-fw*.16,-fw*.04,fw*.035,0,7);ctx.fill();ctx.restore();
     }
   }
 }
-const PU_EMOJI = { star: "⭐", magnet: "🧲", slow: "🐌", shield: "🛡️" };
 function drawPowerups() {
   const t = performance.now() / 1000, sz = H * 0.07;
   for (const pu of powerups) {
@@ -966,13 +1248,28 @@ function drawPowerups() {
     g.addColorStop(0, "rgba(180,230,255,0.7)"); g.addColorStop(1, "rgba(180,230,255,0)");
     ctx.fillStyle = g; ctx.beginPath(); ctx.arc(pu.x, y, r, 0, 6.2832); ctx.fill();
     ctx.restore();
-    emoji(PU_EMOJI[pu.type], pu.x, y, sz);
+    if (!drawAdventureSprite(pu.type, pu.x, y, sz * 1.18, Math.sin(t * 2 + pu.p) * 0.05)) {
+      ctx.fillStyle = "#ffd34d"; ctx.beginPath(); ctx.arc(pu.x, y, sz * 0.36, 0, 7); ctx.fill();
+    }
   }
+}
+function drawMissionItems() {
+  const t=performance.now()/1000;
+  for(const it of missionItems){const y=it.y+Math.sin(t*2.4+it.p)*H*.012;const sz=H*(it.kind==="rescue"?.105:.085);drawMissionSprite(it.kind,it.x,y,sz,Math.sin(t*1.8+it.p)*.045);}
 }
 function drawBirds() {
   const sz = H * 0.085, t = performance.now() / 1000;
-  for (const b of birds) emoji("🦅", b.x, b.y, sz, Math.sin(t * 6 + b.p) * 0.12);
+  for (const b of birds) {
+    const flap = 1 + Math.sin(t * 8 + b.p) * 0.07;
+    ctx.save(); ctx.translate(b.x, b.y); if(b.kind==="albatross")ctx.scale(flap,1/flap);
+    const ok=b.kind==="albatross"?drawAdventureSprite("bird",0,0,sz*1.35,Math.sin(t*6+b.p)*.08):drawHazardSprite(b.kind,0,0,sz*(b.kind==="seal"?1.6:1.35),b.kind==="snowball"?t*2.5:Math.sin(t*3+b.p)*.05);
+    if (!ok) {
+      ctx.fillStyle="#f6fbff";ctx.beginPath();ctx.ellipse(0,0,sz*.42,sz*.22,0,0,7);ctx.fill();
+    }
+    ctx.restore();
+  }
 }
+function drawFriendlyShots(){for(const sh of friendlyShots)drawMissionSprite("ice",sh.x,sh.y,sh.r*3.2,sh.p);}
 function drawGusts() {
   const t = performance.now() / 1000;
   for (const g of gusts) {
@@ -1013,6 +1310,8 @@ function drawDust() {
 
 function drawPlayer() {
   const drawW = H * CONFIG.playerW, drawH = drawW;
+  const now = performance.now() / 1000;
+  const kit = FLIGHT_KITS[selectedKit];
   const star = starT > 0, grace = !star && graceT > 0;
   if (star || grace) {   // invincible glow — full while the star is live, fast flicker while it's running out
     // skip a few frames during grace so it visibly "blinks" → telegraphs that protection is ending
@@ -1040,7 +1339,20 @@ function drawPlayer() {
     ctx.restore();
   }
   ctx.save();
-  ctx.translate(player.x, player.y);
+  const engineBob = Math.sin(now * (state === STATE.PLAYING ? 8 : 3)) * drawH * 0.012;
+  const velocityStretch = state === STATE.PLAYING ? clamp(Math.abs(player.vy) / (H * CONFIG.maxFall), 0, 1) * 0.055 : 0;
+  ctx.translate(player.x, player.y + engineBob);
+  ctx.scale(1 + velocityStretch, 1 - velocityStretch * 0.55);
+  if(selectedKit>0){ctx.save();ctx.globalCompositeOperation="lighter";const kg=ctx.createRadialGradient(0,0,0,0,0,drawW*.62);kg.addColorStop(0,kit.trail+"44");kg.addColorStop(1,"rgba(0,0,0,0)");ctx.fillStyle=kg;ctx.beginPath();ctx.arc(0,0,drawW*.62,0,7);ctx.fill();ctx.restore();}
+  // Two loose scarf tails make the pilot feel alive even when the plane is gliding.
+  ctx.save(); ctx.rotate(player.angle * 0.35); ctx.lineCap = "round";
+  for (let i = 0; i < 2; i++) {
+    const wave = Math.sin(now * 9 + i * 1.7) * drawH * 0.055;
+    ctx.strokeStyle = i ? kit.scarf2 : kit.scarf; ctx.lineWidth = drawH * (i ? 0.045 : 0.06);
+    ctx.beginPath(); ctx.moveTo(-drawW * 0.10, -drawH * (0.12 - i * 0.04));
+    ctx.bezierCurveTo(-drawW * 0.30, -drawH * 0.12 + wave, -drawW * 0.44, -drawH * 0.05 - wave, -drawW * 0.58, -drawH * (0.02 + i * 0.08)); ctx.stroke();
+  }
+  ctx.restore();
   const panic = (panicT > 0 && ASSETS.panic[panicIdx] && ASSETS.panic[panicIdx].ok) ? ASSETS.panic[panicIdx] : null;
   if (panic) {                       // panicked penguin art already faces forward (no flip), and includes its own prop
     ctx.rotate(player.angle * 0.5);
@@ -1062,13 +1374,14 @@ function drawPlayer() {
 function drawProp(drawW, drawH) {
   ctx.save();
   ctx.translate(drawW * 0.46, drawH * 0.03);
-  ctx.globalAlpha = 0.4;
+  const pulse = 0.36 + 0.12 * Math.sin(performance.now() / 45);
+  ctx.globalAlpha = pulse;
   ctx.fillStyle = "rgba(230,236,246,0.5)";
   const rp = drawW * 0.15;
   ctx.beginPath(); ctx.arc(0, 0, rp, 0, 6.2832); ctx.fill();
   ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = rp * 0.16;
-  for (let i = 0; i < 3; i++) {
-    ctx.save(); ctx.rotate(propAngle + i * 2.094);
+  for (let i = 0; i < 4; i++) {
+    ctx.save(); ctx.rotate(propAngle + i * Math.PI / 2);
     ctx.beginPath(); ctx.ellipse(0, 0, rp * 0.95, rp * 0.15, 0, 0, 6.2832); ctx.stroke();
     ctx.restore();
   }
@@ -1094,7 +1407,10 @@ function roundRect(x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 
+// Illustrated articulated gantry; the procedural pipe below remains as a safe fallback.
 function drawBossPipe(mx, my) {   // the gold pipe lowering the gun from the unseen Dreadnought above
+  const art=ASSETS.gantry;
+  if(art&&art.ok){const top=-H*.065,bottom=my+boss.h*.16;if(bottom>top){const dh=bottom-top,dw=dh*(art.width/art.height);ctx.drawImage(art,mx-dw/2,top,dw,dh);return;}}
   const pw = boss.w * 0.135;
   ctx.save();
   const g = ctx.createLinearGradient(mx - pw / 2, 0, mx + pw / 2, 0);
@@ -1136,7 +1452,8 @@ function drawBoss() {
     ctx.fillStyle = eg; ctx.beginPath(); ctx.ellipse(bx, by, brx, bry, 0, 0, 6.2832); ctx.fill(); ctx.restore();
   }
   if (img && img.ok) {
-    ctx.drawImage(img, -boss.w / 2, -boss.h / 2, boss.w, boss.h);
+    if(boss.segment){const sw=img.width*boss.cropFrac;ctx.drawImage(img,0,0,sw,img.height,-boss.w/2,-boss.h/2,boss.w,boss.h);}
+    else ctx.drawImage(img, -boss.w / 2, -boss.h / 2, boss.w, boss.h);
   } else {                                                    // fallback cannon
     ctx.fillStyle = "#6b2230"; roundRect(-boss.w / 2, -boss.h * 0.3, boss.w, boss.h * 0.6, boss.h * 0.2); ctx.fill();
   }
@@ -1171,13 +1488,13 @@ function drawShots() {
 function drawBossHud() {
   if (!bossActive || bossPhase !== 2) return;
   const hp = clamp(1 - bossT / boss.dur, 0, 1);              // survive-timer shown as the boss's health
-  const nm = boss.level >= 2 ? "⚙ DREADNOUGHT" : "⚙ BATTLE CRUISER";
-  const bw = W * 0.6, bh = H * 0.024, x = (W - bw) / 2, y = H * 0.055;
+  const nm=boss.level>=3?"THE DREADNOUGHT":boss.level===2?"DREADNOUGHT GUN DECK":"BATTLE CRUISER";
+  const bw = W * 0.42, bh = H * 0.024, x = W * 0.32, y = H * 0.055;
   ctx.save();
   ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
   ctx.fillStyle = "#fff"; ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = Math.max(2, H * 0.005);
   ctx.font = `800 ${Math.round(H * 0.03)}px -apple-system, system-ui, sans-serif`;
-  ctx.strokeText(nm, W / 2, y - H * 0.012); ctx.fillText(nm, W / 2, y - H * 0.012);
+  ctx.strokeText(nm, x + bw / 2, y - H * 0.012); ctx.fillText(nm, x + bw / 2, y - H * 0.012);
   ctx.fillStyle = "rgba(0,0,0,0.4)"; roundRect(x, y, bw, bh, bh / 2); ctx.fill();
   ctx.fillStyle = hp > 0.3 ? "#ff5a4a" : "#ffd34d"; roundRect(x, y, bw * hp, bh, bh / 2); ctx.fill();
   ctx.restore();
@@ -1228,23 +1545,30 @@ function drawScore() {
   }
   ctx.restore();
   drawPowerHud();
-  ctx.save(); ctx.globalAlpha = muted ? 0.6 : 0.85; emoji(muted ? "🔇" : "🔊", W - H * 0.05, H * 0.05, H * 0.045); ctx.restore();
+  drawSpeakerIcon(W - H * 0.05, H * 0.05, H * 0.023, muted);
+}
+function drawSpeakerIcon(x,y,s,off){
+  ctx.save();ctx.translate(x,y);ctx.globalAlpha=off ? .55 : .9;ctx.fillStyle="#f6fbff";ctx.strokeStyle="#102a56";ctx.lineWidth=Math.max(2,s*.18);ctx.lineCap="round";ctx.lineJoin="round";
+  ctx.beginPath();ctx.moveTo(-s*.9,-s*.35);ctx.lineTo(-s*.35,-s*.35);ctx.lineTo(s*.2,-s*.85);ctx.lineTo(s*.2,s*.85);ctx.lineTo(-s*.35,s*.35);ctx.lineTo(-s*.9,s*.35);ctx.closePath();ctx.fill();ctx.stroke();
+  if(off){ctx.strokeStyle="#ff7a45";ctx.beginPath();ctx.moveTo(s*.45,-s*.65);ctx.lineTo(s*1.05,s*.65);ctx.stroke();}
+  else {for(let i=0;i<2;i++){ctx.beginPath();ctx.arc(s*.12,0,s*(.65+i*.42),-.7,.7);ctx.stroke();}}
+  ctx.restore();
 }
 function drawPowerHud() {
   const items = [];
-  if (starT > 0) items.push(["⭐", starT, CONFIG.starTime]);
-  if (magnetT > 0) items.push(["🧲", magnetT, CONFIG.magnetTime]);
-  if (slowT > 0) items.push(["🐌", slowT, CONFIG.slowTime]);
+  if (starT > 0) items.push(["star", starT, CONFIG.starTime]);
+  if (magnetT > 0) items.push(["magnet", magnetT, CONFIG.magnetTime]);
+  if (slowT > 0) items.push(["slow", slowT, CONFIG.slowTime]);
   const sz = H * 0.05, bw = H * 0.11;
-  let y = H * 0.06;
-  for (const [ch, t, max] of items) {
+  let y = H * 0.16;
+  for (const [kind, t, max] of items) {
     const x = H * 0.04;
-    emoji(ch, x + sz * 0.3, y, sz);
+    drawAdventureSprite(kind, x + sz * 0.3, y, sz * 1.15);
     ctx.fillStyle = "rgba(0,0,0,0.35)"; roundRect(x + sz * 0.7, y - sz * 0.13, bw, sz * 0.26, sz * 0.13); ctx.fill();
     ctx.fillStyle = "#7fe0ff"; roundRect(x + sz * 0.7, y - sz * 0.13, bw * (t / max), sz * 0.26, sz * 0.13); ctx.fill();
     y += sz * 1.25;
   }
-  if (hasShield) { emoji("🛡️", H * 0.04 + sz * 0.3, y, sz); }   // held charge (no timer bar)
+  if (hasShield) drawAdventureSprite("shield", H * 0.04 + sz * 0.3, y, sz * 1.15); // held charge
 }
 function drawBanner() {
   if (bannerT <= 0) return;
@@ -1277,26 +1601,100 @@ function panel(title, lines) {
   ctx.restore();
 }
 
+function roundedPanel(x, y, w, h, r, fill, stroke) {
+  ctx.fillStyle = fill; roundRect(x, y, w, h, r); ctx.fill();
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = Math.max(2, h * 0.008); roundRect(x, y, w, h, r); ctx.stroke(); }
+}
+function fitTitle(text, maxWidth, startSize) {
+  let fs = startSize;
+  do { ctx.font = `900 ${fs}px -apple-system, system-ui, sans-serif`; fs -= 2; }
+  while (fs > 18 && ctx.measureText(text).width > maxWidth);
+  return fs + 2;
+}
+function drawStoryPanel() {
+  const u = Math.min(H, W * 0.72), pw = Math.min(W * 0.72, u * 1.05), ph = Math.min(H * 0.72, u * 0.72);
+  const x = (W - pw) / 2, y = (H - ph) / 2;
+  ctx.save(); ctx.fillStyle = "rgba(8,24,55,.58)"; ctx.fillRect(0,0,W,H);
+  roundedPanel(x, y, pw, ph, u*.035, "#f6f0d8", "#102a56");
+  ctx.strokeStyle="rgba(16,42,86,.18)";ctx.lineWidth=1;for(let ly=y+ph*.25;ly<y+ph*.80;ly+=u*.055){ctx.beginPath();ctx.moveTo(x+pw*.08,ly);ctx.lineTo(x+pw*.92,ly);ctx.stroke();}
+  ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillStyle="#ff7a45";ctx.font=`800 ${Math.round(u*.022)}px -apple-system,system-ui,sans-serif`;ctx.fillText(`LACHLAN'S FLIGHT LOG  •  PAGE ${storyPage+1} OF 3`,W/2,y+ph*.10);
+  const pages = [
+    ["PENGUINS CAN'T FLY.", "Everybody knows that.", "Nobody remembered to tell this penguin."],
+    ["THE FLYING FISH FESTIVAL", "is happening beyond the impossible skies.", "One tiny plane. One very determined pilot."],
+    ["THE MISSION", "Thread the golden rings. Gather flying fish.", "Outsmart Captain Albatross and reach the festival!"]
+  ];
+  const p=pages[storyPage]; const fs=fitTitle(p[0],pw*.84,Math.round(u*.065));
+  ctx.fillStyle="#102a56";ctx.font=`900 ${fs}px -apple-system,system-ui,sans-serif`;ctx.fillText(p[0],W/2,y+ph*.34);
+  ctx.font=`700 ${Math.round(u*.028)}px -apple-system,system-ui,sans-serif`;ctx.fillStyle="#28466d";ctx.fillText(p[1],W/2,y+ph*.52);ctx.fillText(p[2],W/2,y+ph*.62);
+  ctx.fillStyle="#ff7a45";roundedPanel(W/2-u*.16,y+ph*.78,u*.32,u*.065,u*.033,"#ff7a45");ctx.fillStyle="#fff";ctx.font=`900 ${Math.round(u*.026)}px -apple-system,system-ui,sans-serif`;ctx.fillText(storyPage===2?"OPEN FLIGHT SCHOOL →":"TURN THE PAGE →",W/2,y+ph*.812);
+  ctx.restore();
+}
+function drawTutorial() {
+  if (state !== STATE.PLAYING || tutorialStep >= 3 && tutorialT <= 0) return;
+  const messages = ["HOLD TO CLIMB  •  RELEASE TO DIVE", "AIM THROUGH THE GOLDEN CENTER", "COLLECT FISH  •  GRAB THE BLUE SHIELD", "FINISH MISSIONS TO EARN BADGES!"];
+  const msg=messages[tutorialStep], u=Math.min(H,W*.75), w=Math.min(W*.78,u*.9), h=u*.075, x=(W-w)/2, y=H-h-u*.035;
+  ctx.save();ctx.globalAlpha=tutorialT<.5?Math.max(0,tutorialT/.5):1;roundedPanel(x,y,w,h,h/2,"rgba(16,42,86,.88)","rgba(246,251,255,.75)");ctx.fillStyle=tutorialStep===3?"#ffd34d":"#f6fbff";ctx.textAlign="center";ctx.textBaseline="middle";ctx.font=`900 ${Math.round(u*.024)}px -apple-system,system-ui,sans-serif`;ctx.fillText(msg,W/2,y+h/2);ctx.restore();
+}
+function drawMissionHud(){
+  const m=currentMission(),u=Math.min(H,W*.72),w=Math.min(W*.30,u*.50),h=u*.09,x=H*.025,y=H*.025;
+  ctx.save();roundedPanel(x,y,w,h,h*.22,"rgba(16,42,86,.84)","rgba(246,251,255,.45)");ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillStyle="#ffd34d";ctx.font=`900 ${Math.round(u*.018)}px -apple-system,system-ui,sans-serif`;ctx.fillText("FLIGHT MISSION",x+h*.18,y+h*.28);ctx.fillStyle="#f6fbff";ctx.font=`750 ${Math.round(u*.020)}px -apple-system,system-ui,sans-serif`;ctx.fillText(m.label,x+h*.18,y+h*.57);
+  const bx=x+h*.18,by=y+h*.78,bw=w-h*.36,bh=h*.09;ctx.fillStyle="rgba(255,255,255,.18)";roundRect(bx,by,bw,bh,bh/2);ctx.fill();ctx.fillStyle="#ffd34d";roundRect(bx,by,bw*clamp(missionProgress/m.goal,0,1),bh,bh/2);ctx.fill();ctx.textAlign="right";ctx.fillStyle="#f6fbff";ctx.font=`800 ${Math.round(u*.016)}px -apple-system,system-ui,sans-serif`;ctx.fillText(`${missionProgress}/${m.goal}`,x+w-h*.16,y+h*.28);ctx.restore();
+}
+function drawJourneyMap(full){
+  const names=["COAST","SUNSET","AURORA","PEAKS","SPACE"],u=Math.min(H,W*.72),w=full?Math.min(W*.58,u*.92):Math.min(W*.52,u*.76),h=u*(full ? .13 : .105),x=full?W*.39:(W-w)/2,y=full?H*.79:H*.19;
+  ctx.save();roundedPanel(x,y,w,h,h*.22,full?"rgba(246,240,216,.94)":"rgba(16,42,86,.88)",full?"#102a56":"rgba(246,251,255,.5)");const left=x+w*.09,right=x+w*.91,cy=y+h*.52;ctx.strokeStyle=full?"#9eb1bd":"rgba(246,251,255,.35)";ctx.lineWidth=h*.06;ctx.lineCap="round";ctx.beginPath();ctx.moveTo(left,cy);ctx.lineTo(right,cy);ctx.stroke();const world=clamp(Math.floor(passed/CONFIG.biomeLen),0,4);
+  for(let i=0;i<5;i++){const nx=lerp(left,right,i/4),done=i<=world;ctx.fillStyle=done?"#ffd34d":(full?"#cad4d8":"#385473");ctx.beginPath();ctx.arc(nx,cy,h*.115,0,7);ctx.fill();ctx.strokeStyle="#102a56";ctx.lineWidth=h*.025;ctx.stroke();if(full){ctx.fillStyle="#102a56";ctx.textAlign="center";ctx.font=`850 ${Math.round(h*.11)}px -apple-system,system-ui,sans-serif`;ctx.fillText(names[i],nx,y+h*.84);}}
+  const px=lerp(left,right,world/4);ctx.fillStyle="#ff7a45";ctx.beginPath();ctx.moveTo(px,cy-h*.26);ctx.lineTo(px-h*.10,cy-h*.42);ctx.lineTo(px+h*.10,cy-h*.42);ctx.closePath();ctx.fill();ctx.restore();
+}
+function drawFlightKitCard(){
+  const kit=FLIGHT_KITS[selectedKit],u=Math.min(H,W*.72),x=W*.035,y=H*.72,w=W*.29,h=u*.14;ctx.save();roundedPanel(x,y,w,h,h*.16,"rgba(246,240,216,.95)","#102a56");drawMissionSprite("badge",x+h*.48,y+h*.5,h*.72);ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillStyle="#ff7a45";ctx.font=`900 ${Math.round(u*.017)}px -apple-system,system-ui,sans-serif`;ctx.fillText(`FLIGHT KIT  •  ${badges} BADGES`,x+h*.92,y+h*.25);ctx.fillStyle="#102a56";ctx.font=`900 ${Math.round(u*.035)}px -apple-system,system-ui,sans-serif`;ctx.fillText(kit.name,x+h*.92,y+h*.56);ctx.font=`750 ${Math.round(u*.016)}px -apple-system,system-ui,sans-serif`;ctx.fillText("TAP HERE TO CHANGE",x+h*.92,y+h*.82);ctx.restore();
+}
+function drawBossAmmo(){if(!bossActive)return;const u=Math.min(H,W*.72),x=W-u*.31,y=H-u*.115;ctx.save();roundedPanel(x,y,u*.27,u*.075,u*.035,"rgba(16,42,86,.88)","rgba(127,208,255,.8)");for(let i=0;i<3;i++)drawMissionSprite("ice",x+u*(.045+i*.055),y+u*.037,u*.055,0,i<bossAmmo?1:.2);ctx.fillStyle="#f6fbff";ctx.textAlign="right";ctx.textBaseline="middle";ctx.font=`850 ${Math.round(u*.018)}px -apple-system,system-ui,sans-serif`;ctx.fillText(bossAmmo?"TAP TO FIRE":"FIND ICE FISH",x+u*.255,y+u*.038);ctx.restore();}
+function drawDirectionControls(){
+  if(!touchCapable||state!==STATE.PLAYING)return;const d=directionButtons();ctx.save();
+  for(const [kind,b] of Object.entries(d)){const down=kind==="left"?steeringLeft:steeringRight;ctx.fillStyle=down?"rgba(255,211,77,.88)":"rgba(16,42,86,.62)";ctx.strokeStyle=down?"#102a56":"rgba(246,251,255,.72)";ctx.lineWidth=Math.max(2,H*.005);ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,7);ctx.fill();ctx.stroke();ctx.fillStyle=down?"#102a56":"#f6fbff";ctx.beginPath();const s=b.r*.44,dir=kind==="left"?-1:1;ctx.moveTo(b.x+dir*s,b.y);ctx.lineTo(b.x-dir*s*.45,b.y-s);ctx.lineTo(b.x-dir*s*.45,b.y+s);ctx.closePath();ctx.fill();}
+  ctx.restore();
+}
+function drawContinueBossButton(){
+  const b=continueBossButtonRect(),label=`CONTINUE BOSS ${Math.max(1,diedAtBossLevel)}`;ctx.save();roundedPanel(b.x,b.y,b.w,b.h,b.h/2,"#ff7a45","#f6fbff");ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillStyle="#fff";ctx.font=`900 ${Math.round(H*.033)}px -apple-system,system-ui,sans-serif`;ctx.fillText(label,b.x+b.w/2,b.y+b.h*.48);ctx.fillStyle="#f6fbff";ctx.font=`700 ${Math.round(H*.018)}px -apple-system,system-ui,sans-serif`;ctx.fillText("Restart this boss battle",b.x+b.w/2,b.y+b.h*1.38);ctx.fillText("Press R for a full restart",b.x+b.w/2,b.y+b.h*1.72);ctx.restore();
+}
+function drawPortraitPrompt() {
+  skyGradient("#102a56", "#246a8d");
+  const u=W; ctx.save(); ctx.textAlign="center";ctx.textBaseline="middle";
+  ctx.fillStyle="rgba(246,251,255,.10)";ctx.beginPath();ctx.arc(W/2,H*.32,u*.26,0,7);ctx.fill();
+  ctx.save();ctx.translate(W/2,H*.32);ctx.rotate(-Math.PI/2);ctx.strokeStyle="#ffd34d";ctx.lineWidth=u*.025;roundRect(-u*.17,-u*.28,u*.34,u*.56,u*.045);ctx.stroke();ctx.restore();
+  ctx.fillStyle="#ffd34d";ctx.font=`900 ${Math.round(u*.105)}px -apple-system,system-ui,sans-serif`;ctx.fillText("TURN TO FLY!",W/2,H*.60);
+  ctx.fillStyle="#f6fbff";ctx.font=`700 ${Math.round(u*.048)}px -apple-system,system-ui,sans-serif`;ctx.fillText("Rotate your phone sideways",W/2,H*.68);ctx.fillText("and Lachlan's adventure will begin.",W/2,H*.73);
+  ctx.restore();
+}
+
 /* ------------------------------- Loop --------------------------------- */
 let last = performance.now();
 function frame(now) {
   let dt = (now - last) / 1000; last = now;
   if (dt > 0.05) dt = 0.05;
+  if (isPortrait) {
+    drawPortraitPrompt();
+    requestAnimationFrame(frame);
+    return;
+  }
   // keep audio alive: browsers (or another app grabbing sound) can re-suspend
   // the context mid-game — nudge it back awake every frame so sound recovers
   if (AC && AC.state !== "running" && !muted) AC.resume();
   update(dt);
 
   ctx.save();
-  if (shakeT > 0) { const m = shakeT * H * 0.06; ctx.translate(rand(-m, m), rand(-m, m)); }
+  if (shakeT > 0 && !reducedMotion) { const m = shakeT * H * 0.06; ctx.translate(rand(-m, m), rand(-m, m)); }
   drawBackground();
   drawStars();
   drawFish();
   drawPowerups();
+  drawMissionItems();
   drawGusts();
   for (const r of rings) drawRing(r, "left");
   if (bossActive) drawBoss();
   drawPlayer();
+  drawFriendlyShots();
   for (const r of rings) drawRing(r, "right");
   if (bossActive) drawShots();
   drawBirds();
@@ -1306,32 +1704,42 @@ function frame(now) {
   drawDust();
   ctx.restore();
 
-  if (state === STATE.PLAYING) { drawScore(); drawBanner(); drawBossHud(); }
+  if(nearMissT>0&&!reducedMotion){ctx.save();ctx.globalAlpha=nearMissT*.5;ctx.strokeStyle="#ff7a45";ctx.lineWidth=H*.035;ctx.strokeRect(0,0,W,H);ctx.restore();}
+
+  if (state === STATE.PLAYING) { drawScore(); drawMissionHud(); drawBanner(); drawBossHud(); drawBossAmmo(); drawTutorial(); drawDirectionControls(); if(mapT>0)drawJourneyMap(false); }
+  else if (state === STATE.STORY) {
+    drawStoryPanel();
+  }
   else if (state === STATE.READY) {
-    panel("If Penguins Could Fly", [
-      { text: "Hold to fly up — let go to dive" },
-      { text: "🐟 grab fish   ⭐🧲🐌🛡️ power-ups   🦅 dodge" },
-      { text: "Tap / Click / Spacebar to start", color: "#ffd34d" },
+    panel("Flight School", [
+      { text: "Hold to climb, release to dive" },
+      { text: "Steer with ← → or the on-screen arrows" },
+      { text: "Finish flight missions to earn badges + unlock kits", color: "#7fd0ff" },
+      { text: "Tap right / Click / Spacebar to start", color: "#ffd34d" },
       { text: best > 0 ? "Best: " + best : "" },
     ]);
+    drawFlightKitCard(); drawJourneyMap(true);
   } else if (state === STATE.WIN) {
     drawScore();
-    panel("🏆 YOU WIN! 🏆", [
+    panel("YOU MADE IT!", [
       { text: "You beat the Dreadnought!", color: "#ffd34d", big: true },
       { text: "Final Score: " + score, big: true },
       { text: "Best: " + best, color: "#ffd34d" },
+      { text: "Flight badges: " + badges, color: "#7fd0ff" },
       { text: "" },
       { text: "Tap to fly again" },
     ]);
+    drawMissionSprite("festival",W*.82,H*.25,H*.24,-.08);
   } else if (state === STATE.OVER) {
     drawScore();
     panel("Game Over", [
       { text: "Score: " + score, big: true },
       { text: "Best: " + best, color: "#ffd34d" },
       { text: "" },
-      { text: diedAtBoss ? "Tap to retry the boss" : "Tap to play again", color: diedAtBoss ? "#ff8a3d" : "#fff" },
-      { text: diedAtBoss ? "Press R to restart from the start" : "" },
+      { text: diedAtBoss ? "Your boss checkpoint is saved" : "Tap to play again", color: diedAtBoss ? "#ff8a3d" : "#fff" },
+      { text: "" },
     ]);
+    if(diedAtBoss)drawContinueBossButton();
   }
   requestAnimationFrame(frame);
 }
