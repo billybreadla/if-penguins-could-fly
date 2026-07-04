@@ -27,7 +27,7 @@
    ---------------------------------------------------------------------
    Hold (tap / click / spacebar) to climb. Release to drop.
    Fly through the hole in each ring. Grab fish 🐟 for points, snag
-   power-ups (⭐ smash / 🧲 magnet / 🐌 slow-mo), dodge eagles 🦅, and
+   power-ups, dodge hazards, and
    ride through changing skies. Press M to mute.
 
    *** TUNING ZONE ***  All feel lives in CONFIG. Everything is sized as
@@ -81,11 +81,14 @@ const CONFIG = {
   arena2At:    300,    // score at which you fly into the Dusty Hills
   gustSpacing: 0.72,   // distance between gust-cloud slots (screen-heights)
 
-  // --- boss battle ---
-  bossAt:         600,  // score that triggers boss 1
+  // --- worlds & bosses ---
+  // Every world is a timed flight to its boss (reliable + tunable, not
+  // gated on how many fish you happened to grab).
+  ammoCap:        6,    // how many ice fish you can stockpile during a boss fight before firing
+  world1Time:     48,   // World 1: sunny-skies run → Captain Albatross's gun
+  world2Time:     52,   // World 2: storm run → the Gun Deck
+  world3Time:     58,   // World 3: final approach → the full Dreadnought
   bossDuration:  32,    // seconds you must survive before boss 1 goes down
-  boss2Span:     1500,  // longer hectic ring run after boss 1
-  boss3Span:     1200,  // final approach after the gun deck
   level2SpeedCap: 0.98, // keep the side-scroll exciting without becoming a blur
   level3SpeedCap: 1.02,
   boss2EntryTime:  3.4, // long readable entrance before the Dreadnought becomes active
@@ -160,7 +163,7 @@ const ASSETS = {
     6: loadImg("images/world-storm-v5.webp"),
     7: loadImg("images/world-storm-v5.webp"),
   },
-  skins: [                                               // by selectedKit; 0 = animated heroStrip
+  skins: [                                               // 0 = animated Classic heroStrip (the only one used now)
     null,
     loadImg("images/plane-sunset-v5.webp"),
     loadImg("images/plane-aurora-v5.webp"),
@@ -187,19 +190,9 @@ const HAZARD_FRAMES = {
 const MISSION_FRAMES = {
   rescue:{x:0,w:385}, map:{x:410,w:330}, ice:{x:790,w:360}, badge:{x:1200,w:350}, festival:{x:1600,w:380},
 };
-const MISSIONS = [
-  { key: "rings", label: "Thread 5 golden rings", goal: 5 },
-  { key: "fish", label: "Catch 10 flying fish", goal: 10 },
-  { key: "perfect", label: "Nail 3 perfect rings", goal: 3 },
-  { key: "map", label: "Find 3 map pieces", goal: 3 },
-  { key: "rescue", label: "Rescue 2 lost pilots", goal: 2 },
-];
-const FLIGHT_KITS = [
-  { name: "Classic", need: 0, scarf: "#e94236", scarf2: "#ff9b45", trail: "#ffffff" },
-  { name: "Sunset", need: 2, scarf: "#ff7a45", scarf2: "#ffd34d", trail: "#ffb36b" },
-  { name: "Aurora", need: 5, scarf: "#47e0c1", scarf2: "#7fd0ff", trail: "#65f0d0" },
-  { name: "Midnight", need: 9, scarf: "#7652b8", scarf2: "#c49cff", trail: "#a99cff" },
-];
+// Single pilot look. (Mission checklists, badges, and kit cycling were removed in
+// the World 1 declutter pass — progression is now about reaching and beating bosses.)
+const PILOT = { scarf: "#e94236", scarf2: "#ff9b45", trail: "#ffffff" };
 // fancy fish (clownfish + rainbow) are rarer and worth bonus points
 const FISH_RARE = { 1: 15, 6: 12 };   // index → point value; others use CONFIG.fishValue
 
@@ -323,16 +316,17 @@ let trailAcc, birdCooldown, gustCooldown, pairNext, nextSpacing, lastGapY;
 let washCur, darkCur, starAmt, snowAmt, dustAmt, lastBiome;
 let arena, banner, bannerT, overAt = 0;
 let bossActive, bossBeaten, bossPhase, boss, shots, bossT, bossShootCd, bossPartsThrown, diedAtBoss;
-let level, nextBossAt, speedCap, diedAtBossLevel;
+let level, speedCap, diedAtBossLevel;
 let panicT, panicIdx;
 let perfectStreak = 0, perfectTotal = 0, nearMissT = 0;
-let missionIndex = 0, missionProgress = 0, missionCompleteT = 0;
+let approachT = 0;                       // seconds flown so far this run (drives the Boss 1 meter + trigger)
 let mapT = 0, bossAmmo = 0, bossSupplyCd = 0;
 
 best = parseInt(localStorage.getItem("ipcf_best") || "0", 10) || 0;
-let badges = parseInt(localStorage.getItem("ipcf_badges") || "0", 10) || 0;
-let selectedKit = clamp(parseInt(localStorage.getItem("ipcf_kit") || "0", 10) || 0, 0, FLIGHT_KITS.length - 1);
-if (badges < FLIGHT_KITS[selectedKit].need) selectedKit = 0;
+// persisted world progress: 0 = none cleared, 3 = all bosses beaten
+let worldsCleared = clamp(parseInt(localStorage.getItem("ipcf_worlds") || "0", 10) || 0, 0, 3);
+if (!worldsCleared && localStorage.getItem("ipcf_world1_cleared")) worldsCleared = 1;  // migrate old flag
+let currentWorld = 1;
 const reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /* ambient particle pools (created on resize) */
@@ -355,11 +349,11 @@ function reset() {
   starT = magnetT = slowT = graceT = 0; hasShield = false;
   bossActive = false; bossBeaten = false; bossPhase = 0; boss = null; shots = []; bossT = 0; bossShootCd = 0;
   bossPartsThrown = 0; diedAtBoss = false;
-  level = 1; nextBossAt = CONFIG.bossAt; speedCap = CONFIG.maxSpeed; diedAtBossLevel = 1;
+  level = 1; speedCap = CONFIG.maxSpeed; diedAtBossLevel = 1;
   panicT = 0; panicIdx = 0;
   tutorialStep = 0; tutorialT = 0;
   perfectStreak = 0; perfectTotal = 0; nearMissT = 0;
-  missionIndex = 0; missionProgress = 0; missionCompleteT = 0; mapT = 0;
+  approachT = 0; mapT = 0;
   bossAmmo = 0; bossSupplyCd = 3.5;
   trailAcc = 0; birdCooldown = H * 2; gustCooldown = H * 1.2;
   pairNext = false; nextSpacing = CONFIG.ringSpacing; lastGapY = 0.5;
@@ -432,38 +426,34 @@ function attachItems(r) {
   const holeHalf = (H * CONFIG.ringHeight * RING.holeFrac) / 2;
   if (Math.random() < 0.72) spawnFishLine(r.x, r.cy, holeHalf * 0.55);
   maybeSpawnPower(r.x + H * CONFIG.ringSpacing * 0.5, r.cy + (Math.random() * 2 - 1) * H * 0.14);
-  const mk = MISSIONS[missionIndex % MISSIONS.length].key;
-  if ((mk === "map" || mk === "rescue") && Math.random() < 0.42) {
-    missionItems.push({ x: r.x + H * CONFIG.ringSpacing * 0.46, y: clamp(r.cy + rand(-0.12, 0.12) * H, H*.18, H*.82), kind: mk, p: rand(0,6.28) });
-  }
 }
-function currentMission() { return MISSIONS[missionIndex % MISSIONS.length]; }
 function haptic(ms) { if (!reducedMotion && navigator.vibrate) navigator.vibrate(ms); }
-function missionEvent(key, amount) {
-  const m = currentMission(); if (!m || m.key !== key) return;
-  missionProgress += amount || 1;
-  if (missionProgress < m.goal) return;
-  badges++; localStorage.setItem("ipcf_badges", String(badges));
-  score += 75; missionCompleteT = 3.0; mapT = 3.4;
-  addText(W*.5, H*.34, "MISSION COMPLETE  +75", "#ffd34d", 1.35);
-  const unlocked=FLIGHT_KITS.find(k=>k.need===badges);if(unlocked&&unlocked.need>0)addText(W*.5,H*.43,`${unlocked.name.toUpperCase()} KIT UNLOCKED!`,"#7fd0ff",1.15);
-  burst("spark", W*.5, H*.38, 26, { color: "#ffd34d", spMax:.8, grav:.2, lifeMax:1 });
-  SFX.power(); haptic([35,30,55]);
-  missionIndex++; missionProgress = 0;
+/* per-world approach: seconds of flight before that world's boss shows up */
+function worldTime(n) { return n >= 3 ? CONFIG.world3Time : n === 2 ? CONFIG.world2Time : CONFIG.world1Time; }
+/* how far along this world's approach we are (0..1) — drives the boss meter + cloud darkening */
+function approachFrac() { return clamp(approachT / worldTime(level), 0, 1); }
+/* set up a world's speed/arena, used by both the world select and boss retry */
+function applyWorldConfig(n) {
+  currentWorld = n; level = n;
+  if (n >= 3)      { arena = 4; speedCap = CONFIG.level3SpeedCap; speed = CONFIG.startSpeed * 1.55; }
+  else if (n === 2){ arena = 3; speedCap = CONFIG.level2SpeedCap; speed = CONFIG.startSpeed * 1.45; }
 }
-/* clouds start light and darken as you progress toward the boss (cloud_0..8) */
-function cloudTier() { return clamp(Math.floor(score / 600), 0, ASSETS.clouds.length - 1); }
+function startWorld(n) {
+  reset(); applyWorldConfig(n);
+  state = STATE.PLAYING; holding = true;
+  tutorialT = n === 1 ? 5 : 0;
+  banner = n === 2 ? "WORLD 2 — THE STORM RUN!" : n >= 3 ? "WORLD 3 — DREADNOUGHT SKIES!" : "";
+  bannerT = banner ? 3.2 : 0;
+  SFX.flap();
+}
+/* clouds start light and darken as the boss approaches (cloud_0..8) */
+function cloudTier() { return clamp(Math.floor(approachFrac() * (ASSETS.clouds.length - 1)), 0, ASSETS.clouds.length - 1); }
 /* a gust cloud hazard in the Dusty Hills */
 function makeGust(x, yf) {
   return { x, baseY: yf * H, y: yf * H, r: H * rand(0.075, 0.105), p: rand(0, 6.28), scored: false, cloud: cloudTier() };
 }
 
 /* ------------------------------- Input -------------------------------- */
-function cycleFlightKit() {
-  const unlocked = FLIGHT_KITS.filter(k => badges >= k.need).length;
-  selectedKit = (selectedKit + 1) % Math.max(1, unlocked);
-  localStorage.setItem("ipcf_kit", String(selectedKit)); SFX.power();
-}
 function fireFriendlyShot() {
   if (!bossActive || bossAmmo <= 0) return;
   bossAmmo--;
@@ -474,6 +464,10 @@ function directionButtons() {
   const r=H*.066, cy=H*.82;
   return { left:{x:H*.095,y:cy,r}, right:{x:H*.245,y:cy,r} };
 }
+// Big dedicated FIRE button (bottom-right) — only live during a boss fight. Lets you
+// HOLD your ice fish and shoot on purpose, instead of every climb-tap dumping a shot.
+function fireButton(){ const r=H*.082; return { x: W-H*.13, y: H*.80, r }; }
+function fireHit(px,py){ if(!bossActive)return false; const b=fireButton(); return Math.hypot(px-b.x,py-b.y)<=b.r*1.2; }
 function directionHit(px,py) {
   const d=directionButtons();
   if(Math.hypot(px-d.left.x,py-d.left.y)<=d.left.r*1.25)return "left";
@@ -484,10 +478,8 @@ function continueBossButtonRect(){const w=Math.min(W*.42,H*.62),h=H*.085;return{
 function continueBossHit(px,py){const b=continueBossButtonRect();return px>=b.x&&px<=b.x+b.w&&py>=b.y&&py<=b.y+b.h;}
 function continueBoss() {
   const retryLevel=diedAtBossLevel; // preserve this before reset() restores level one
-  reset();
-  if(retryLevel>=3){level=3;arena=4;speedCap=CONFIG.level3SpeedCap;speed=CONFIG.startSpeed*1.55;score=CONFIG.bossAt+CONFIG.boss2Span+CONFIG.boss3Span;}
-  else if(retryLevel>=2){level=2;arena=3;speedCap=CONFIG.level2SpeedCap;speed=CONFIG.startSpeed*1.45;score=CONFIG.bossAt+CONFIG.boss2Span;}
-  else {level=1;score=CONFIG.bossAt;}
+  reset(); applyWorldConfig(retryLevel);
+  approachT = worldTime(retryLevel);   // skip straight back to the fight
   state=STATE.PLAYING;startBoss(retryLevel);
 }
 function press(px, py) {
@@ -498,10 +490,14 @@ function press(px, py) {
     if (storyPage >= 3) { storyPage = 0; state = STATE.READY; localStorage.setItem("ipcf_story_seen", "1"); }
   }
   else if (state === STATE.READY) {
-    if (px != null && px < W*.34 && py > H*.66) { cycleFlightKit(); return; }
-    state = STATE.PLAYING; holding = true; tutorialT = 5; SFX.flap();
+    // world select: tap a card to fly that world; anywhere else = next world up
+    if (px != null && worldsCleared > 0) {
+      const hit = worldCardHit(px, py);
+      if (hit) { startWorld(hit); return; }
+    }
+    startWorld(Math.min(worldsCleared + 1, 3));
   }
-  else if (state === STATE.PLAYING) { if (bossAmmo > 0) fireFriendlyShot(); holding = true; SFX.flap(); }
+  else if (state === STATE.PLAYING) { holding = true; SFX.flap(); }
   else if (state === STATE.WIN && performance.now() - overAt > 350) { reset(); state = STATE.READY; }
   else if (state === STATE.OVER && performance.now() - overAt > 350) {
     if (diedAtBoss) { if(px==null||continueBossHit(px,py))continueBoss(); }
@@ -523,12 +519,13 @@ function handleMuteTap(px, py) {
   return true;
 }
 
-canvas.addEventListener("mousedown", (e) => { e.preventDefault(); if (handleMuteTap(e.clientX, e.clientY)) return; press(e.clientX, e.clientY); });
+canvas.addEventListener("mousedown", (e) => { e.preventDefault(); if (handleMuteTap(e.clientX, e.clientY)) return; if (fireHit(e.clientX, e.clientY)) { fireFriendlyShot(); return; } press(e.clientX, e.clientY); });
 window.addEventListener("mouseup", () => release());
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
   for(const t of e.changedTouches){
     if(handleMuteTap(t.clientX,t.clientY))continue;
+    if(state===STATE.PLAYING&&fireHit(t.clientX,t.clientY)){fireFriendlyShot();continue;}
     const dir=state===STATE.PLAYING?directionHit(t.clientX,t.clientY):null;
     if(dir==="left"){leftTouchId=t.identifier;steeringLeft=true;continue;}
     if(dir==="right"){rightTouchId=t.identifier;steeringRight=true;continue;}
@@ -542,10 +539,15 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); if (!e.repeat) press(); }
   if(e.code==="ArrowLeft"){e.preventDefault();steeringLeft=true;}
   if(e.code==="ArrowRight"){e.preventDefault();steeringRight=true;}
+  if ((e.code === "KeyF" || e.code === "Enter") && state === STATE.PLAYING) { e.preventDefault(); fireFriendlyShot(); }
   if (e.code === "KeyM") { muted = !muted; }
-  if (e.code === "KeyC" && state === STATE.READY) cycleFlightKit();
   // R on the game-over screen = full restart from zero (vs. tap = retry the boss)
   if (e.code === "KeyR" && state === STATE.OVER) { reset(); state = STATE.READY; }
+  // 1/2/3 on the title = fly straight into that world (if unlocked)
+  if (state === STATE.READY && /^Digit[123]$/.test(e.code)) {
+    const n = Number(e.code.slice(5));
+    if (n <= worldsCleared + 1) { e.preventDefault(); startWorld(n); }
+  }
 });
 window.addEventListener("keyup", (e) => {
   if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); release(); }
@@ -627,7 +629,6 @@ function update(dt) {
   if (state !== STATE.PLAYING) return;
 
   tutorialT = Math.max(0, tutorialT - dt);
-  missionCompleteT = Math.max(0, missionCompleteT - dt);
   mapT = Math.max(0, mapT - dt);
   nearMissT = Math.max(0, nearMissT - dt);
   if (passed >= 3) tutorialStep = 3;
@@ -665,7 +666,7 @@ function update(dt) {
     particles.push({
       kind: "puff", x: player.x - drawW * 0.42, y: player.y + drawH * 0.12,
       vx: -speed * H * 0.25 * ws * starRush, vy: rand(-0.02, 0.02) * H,
-      life: 0.55, max: 0.55, size: H * 0.018, grow: H * 0.05, color: FLIGHT_KITS[selectedKit].trail,
+      life: 0.55, max: 0.55, size: H * 0.018, grow: H * 0.05, color: PILOT.trail,
     });
   }
 
@@ -676,8 +677,13 @@ function update(dt) {
   // player hit radius (used by boss shots; rings compute their own below)
   const phhAll = (drawW * (616 / 940) * CONFIG.hitScale) / 2;
 
-  // ---- boss battle: takes over the arena at the threshold score ----
-  if (!bossActive && !bossBeaten && score >= nextBossAt) startBoss(level);
+  // ---- boss battle ----
+  // Every world's boss arrives on a steady flight timer, so the run to the
+  // boss is short and reliable (not gated on how many fish you happened to grab).
+  if (!bossActive && !bossBeaten) {
+    approachT += dt;
+    if (approachT >= worldTime(level)) startBoss(level);
+  }
   if (bossActive) {
     bossSupplyCd -= dt;
     if (bossSupplyCd <= 0 && missionItems.filter(i => i.kind === "ice").length < 2) {
@@ -754,14 +760,13 @@ function update(dt) {
         if (passed <= 3) tutorialT = 4.0;
         speed = Math.min(speedCap, speed + CONFIG.speedRamp);
         addScore(1, player.x, player.y - drawH * 0.5);
-        missionEvent("rings", 1);
         const centerError = Math.abs(player.y - r.cy);
         if (centerError < holeHalf * 0.18) {
           perfectStreak++; perfectTotal++;
           addScore(2 + Math.min(perfectStreak, 5), player.x, player.y - drawH*.78);
           addText(player.x, player.y + drawH*.62, perfectStreak > 1 ? `PERFECT x${perfectStreak}` : "PERFECT!", "#ffd34d", 1.25);
           burst("spark", player.x, player.y, 18, { color:"#ffd34d", spMax:.65, grav:.1, lifeMax:.7 });
-          missionEvent("perfect", 1); haptic(22);
+          haptic(22);
         } else {
           perfectStreak = 0;
           if (centerError > holeHalf*.76) { nearMissT = .55; addText(player.x, player.y, "CLOSE CALL!", "#ff9b45", 1.05); }
@@ -796,22 +801,20 @@ function update(dt) {
       fish.splice(i, 1);
       const val = FISH_RARE[f.type] || CONFIG.fishValue;
       addScore(val, f.x, f.y);
-      missionEvent("fish", 1);
       const rare = !!FISH_RARE[f.type];
       burst("spark", f.x, f.y, rare ? 12 : 7, { color: rare ? "#7fffd4" : "#ffd34d", spMax: rare ? 0.6 : 0.4, grav: 0.3, lifeMax: 0.5 });
       SFX.fish();
     }
   }
 
-  // mission collectibles: map fragments, parachuting pilots, and boss ice-fish ammo
+  // boss ice-fish ammo (the only collectible left in this array — grab it to shoot the boss)
   for (let i = missionItems.length - 1; i >= 0; i--) {
     const it = missionItems[i]; it.p += dt * 2.5;
     if (it.x < -W*.12) { missionItems.splice(i,1); continue; }
     if (Math.hypot(player.x-it.x, player.y-it.y) < phh + H*.055) {
       missionItems.splice(i,1);
-      if (it.kind === "ice") { bossAmmo = Math.min(3,bossAmmo+1); addText(it.x,it.y,"ICE SHOT READY!","#7fd0ff",1.12); }
-      else { missionEvent(it.kind,1); addScore(it.kind === "rescue" ? 25 : 15,it.x,it.y); }
-      burst("spark",it.x,it.y,16,{color:it.kind==="ice"?"#7fd0ff":"#ffd34d",spMax:.6,grav:.15,lifeMax:.7});SFX.power();haptic(18);
+      bossAmmo = Math.min(CONFIG.ammoCap,bossAmmo+1); addText(it.x,it.y,"ICE FISH +1","#7fd0ff",1.12);
+      burst("spark",it.x,it.y,16,{color:"#7fd0ff",spMax:.6,grav:.15,lifeMax:.7});SFX.power();haptic(18);
     }
   }
 
@@ -905,10 +908,10 @@ function checkBiome() {
 }
 
 /* =============================== BOSS BATTLE ===========================
-   At CONFIG.bossAt the sky turns stormy and an enemy plane appears. The
-   penguin can't shoot — you survive. The boss fires bolts and, as it gets
-   wrecked, hurls chunks of its own plane. Outlast CONFIG.bossDuration and
-   it spins down to the ground: level beaten. */
+   After worldTime(level) seconds of flight the sky turns stormy and the
+   world's boss appears. Survive its bolts (and the plane chunks it hurls as
+   it gets wrecked) for its duration — or speed things up by firing stocked
+   ice fish. Outlast it and it spins down: world cleared. */
 function startBoss(lvl) {
   lvl = lvl || 1;
   bossActive = true; bossPhase = 1; bossT = 0; bossShootCd = 0; bossPartsThrown = 0;
@@ -944,23 +947,11 @@ function bossWin() {
   bossActive = false; bossPhase = 0; boss = null; shots = [];
   score += 1000 * lvl; addText(W * 0.5, H * 0.42, "+" + (1000 * lvl), "#ffd34d", 1.7);
   shakeT = 0.5; SFX.power();
-  if (lvl >= 3) {                       // the full Dreadnought is the finale
-    bossBeaten = true; overAt = performance.now(); state = STATE.WIN;
-    if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); }
-    return;
-  } else if (lvl === 2) {               // the gun deck is down; approach the full ship
-    level = 3; bossBeaten = false; arena = 4;
-    speedCap = CONFIG.level3SpeedCap;
-    speed = Math.min(speed, CONFIG.startSpeed*1.78);
-    nextBossAt = score + CONFIG.boss3Span;
-    banner = "LEVEL 3 — DREADNOUGHT APPROACH!"; bannerT = 4.8; mapT = 4.0;
-  } else {                              // advance into the longer Level 2 ring run
-    level = 2; bossBeaten = false; arena = 3;
-    speedCap = CONFIG.level2SpeedCap;
-    speed = Math.min(speed, CONFIG.startSpeed * 1.76);
-    nextBossAt = score + CONFIG.boss2Span;
-    banner = "LEVEL 2 — THE LONG STORM RUN!"; bannerT = 4.8; mapT = 4.0;
-  }
+  // Any boss down = that world is CLEARED. Celebrate, save progress,
+  // and send the pilot back to the world select with the next world open.
+  bossBeaten = true; overAt = performance.now(); state = STATE.WIN;
+  worldsCleared = Math.max(worldsCleared, lvl);
+  localStorage.setItem("ipcf_worlds", String(worldsCleared));
   if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); }
 }
 function throwPart() {   // a chunk of the cruiser breaks off and flies at the penguin
@@ -1012,7 +1003,7 @@ function updateBoss(dt, ws, phh) {
     boss.y += (boss.baseY - boss.y) * Math.min(1, dt * 2.2);
     boss.enterT -= dt;
     if (now % 70 < 35) shakeT = Math.max(shakeT, 0.12);
-    if (boss.enterT <= 0) { bossPhase = 2; bossShootCd = boss.firstShotDelay; banner = boss.level>=2 ? "GET READY — SHE'S MOVING IN!" : "GRAB ICE FISH — TAP TO FIRE!"; bannerT = 3.2; }
+    if (boss.enterT <= 0) { bossPhase = 2; bossShootCd = boss.firstShotDelay; banner = boss.level>=2 ? "GET READY — SHE'S MOVING IN!" : "GRAB ICE FISH — HIT FIRE TO SHOOT!"; bannerT = 3.2; }
   } else if (bossPhase === 2) {                           // FIGHT
     bossT += dt;
     const frac = clamp(bossT / T, 0, 1);
@@ -1360,7 +1351,7 @@ function drawDust() {
 function drawPlayer() {
   const drawW = H * CONFIG.playerW, drawH = drawW;
   const now = performance.now() / 1000;
-  const kit = FLIGHT_KITS[selectedKit];
+  const kit = PILOT;
   const star = starT > 0, grace = !star && graceT > 0;
   if (star || grace) {   // invincible glow — full while the star is live, fast flicker while it's running out
     // skip a few frames during grace so it visibly "blinks" → telegraphs that protection is ending
@@ -1392,7 +1383,6 @@ function drawPlayer() {
   const velocityStretch = state === STATE.PLAYING ? clamp(Math.abs(player.vy) / (H * CONFIG.maxFall), 0, 1) * 0.055 : 0;
   ctx.translate(player.x, player.y + engineBob);
   ctx.scale(1 + velocityStretch, 1 - velocityStretch * 0.55);
-  if(selectedKit>0){ctx.save();ctx.globalCompositeOperation="lighter";const kg=ctx.createRadialGradient(0,0,0,0,0,drawW*.62);kg.addColorStop(0,kit.trail+"44");kg.addColorStop(1,"rgba(0,0,0,0)");ctx.fillStyle=kg;ctx.beginPath();ctx.arc(0,0,drawW*.62,0,7);ctx.fill();ctx.restore();}
   // Two loose scarf tails make the pilot feel alive even when the plane is gliding.
   ctx.save(); ctx.rotate(player.angle * 0.35); ctx.lineCap = "round";
   for (let i = 0; i < 2; i++) {
@@ -1425,7 +1415,7 @@ function heroFrame() {
 // Draws the equipped hero: a painted skin (kits 1-3) or the animated Classic
 // strip (kit 0). Returns false if no art is ready so the caller can fall back.
 function drawHero(drawW, drawH) {
-  const skin = ASSETS.skins[selectedKit];
+  const skin = ASSETS.skins[0];
   if (skin && skin.ok) {
     ctx.save(); ctx.scale(-1, 1);   // art's nose points left; flip to fly forward
     ctx.drawImage(skin, -drawW / 2, -drawH / 2, drawW, drawH);
@@ -1621,12 +1611,15 @@ function drawScore() {
   ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
   ctx.fillStyle = "#fff"; ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.lineWidth = Math.max(3, H * 0.008);
   const fs = Math.round(H * 0.075);
+  // drop the score below the boss-approach meter while it's on screen so they don't collide
+  const meterUp = state === STATE.PLAYING && !bossActive && !bossBeaten;
+  const sy = meterUp ? H * 0.19 : H * 0.12;
   ctx.font = `900 ${fs}px -apple-system, system-ui, sans-serif`;
-  ctx.strokeText(String(score), W / 2, H * 0.12); ctx.fillText(String(score), W / 2, H * 0.12);
+  ctx.strokeText(String(score), W / 2, sy); ctx.fillText(String(score), W / 2, sy);
   if (combo > 1 && performance.now() / 1000 - lastScoreT < CONFIG.comboWindow) {
     const cf = Math.round(H * 0.034);
     ctx.font = `800 ${cf}px -apple-system, system-ui, sans-serif`; ctx.fillStyle = "#ffd34d";
-    ctx.strokeText("Combo x" + combo, W / 2, H * 0.155); ctx.fillText("Combo x" + combo, W / 2, H * 0.155);
+    ctx.strokeText("Combo x" + combo, W / 2, sy + H * 0.035); ctx.fillText("Combo x" + combo, W / 2, sy + H * 0.035);
   }
   ctx.restore();
   drawPowerHud();
@@ -1723,47 +1716,137 @@ function drawStoryPanel() {
   ctx.fillStyle="#ff7a45";roundedPanel(W/2-u*.18,y+ph*.84,u*.36,u*.07,u*.035,"#ff7a45");ctx.fillStyle="#fff";ctx.font=`900 ${Math.round(u*.026)}px -apple-system,system-ui,sans-serif`;ctx.fillText(storyPage===2?"OPEN FLIGHT SCHOOL →":"TURN THE PAGE →",W/2,y+ph*.876);
   ctx.restore();
 }
+// one legend icon, centered at (x,y). Reuses in-game sprites so the picture
+// on the title screen matches exactly what shows up while flying.
+function drawLegendIcon(kind, x, y, size) {
+  if (kind === "fish") { const img = ASSETS.fish[0]; if (img && img.ok) { const h = size * (img.height / img.width); ctx.save(); ctx.translate(x, y); ctx.drawImage(img, -size/2, -h/2, size, h); ctx.restore(); return; } }
+  if (kind === "ring") { ctx.save(); ctx.strokeStyle = "#ffcf3f"; ctx.lineWidth = size*0.22; ctx.beginPath(); ctx.arc(x, y, size*0.38, 0, 7); ctx.stroke(); ctx.restore(); return; }
+  if (kind === "bolt") { const img = ASSETS.bullet; if (img && img.ok) { const h = size*(img.height/img.width); ctx.save(); ctx.translate(x, y); ctx.drawImage(img, -size/2, -h/2, size, h); ctx.restore(); return; } ctx.save(); ctx.fillStyle = "#ff5a3c"; ctx.beginPath(); ctx.arc(x, y, size*0.3, 0, 7); ctx.fill(); ctx.restore(); return; }
+  if (kind === "bird") { drawAdventureSprite("bird", x, y, size); return; }
+  if (kind === "ice") { drawMissionSprite("ice", x, y, size); return; }
+  if (HAZARD_FRAMES[kind]) { drawHazardSprite(kind, x, y, size); return; }   // seal / ufo / balloon / snowball / storm
+  drawAdventureSprite(kind, x, y, size);   // star / magnet / slow / shield
+}
 function drawTitleScreen() {
   // hero key-art backdrop + a soft scrim so text stays readable
   if (ASSETS.titleHero && ASSETS.titleHero.ok) drawCoverImage(ASSETS.titleHero);
   else skyGradient("#4fb6f5", "#9fd8fb");
-  ctx.fillStyle = "rgba(8,22,48,0.26)"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "rgba(8,22,48,0.34)"; ctx.fillRect(0, 0, W, H);
   // wordmark, top-center
   if (ASSETS.wordmark && ASSETS.wordmark.ok) {
-    const ww = Math.min(W * 0.50, H * 0.95), wh = ww * (ASSETS.wordmark.height / ASSETS.wordmark.width);
-    ctx.drawImage(ASSETS.wordmark, (W - ww) / 2, H * 0.05, ww, wh);
+    const ww = Math.min(W * 0.44, H * 0.8), wh = ww * (ASSETS.wordmark.height / ASSETS.wordmark.width);
+    ctx.drawImage(ASSETS.wordmark, (W - ww) / 2, H * 0.03, ww, wh);
   }
-  // instruction block, between the wordmark and the bottom kit/map cards
-  const u = Math.min(H, W * 0.72), bw = Math.min(W * 0.66, u * 1.2), bh = u * 0.30;
-  const bx = (W - bw) / 2, by = H * 0.42;
-  roundedPanel(bx, by, bw, bh, u * 0.04, "rgba(8,24,55,0.52)", "rgba(246,251,255,0.32)");
+  const u = Math.min(H, W * 0.72);
+  // controls line, just above the legend
   ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.lineWidth = Math.max(2, H * 0.006); ctx.strokeStyle = "rgba(0,0,0,0.5)";
-  const lines = [
-    ["Hold to climb, release to dive", "#f6fbff", 0.040],
-    ["Finish missions to earn badges + unlock kits", "#7fd0ff", 0.031],
-    ["Tap / Click / Spacebar to start", "#ffd34d", 0.040],
-  ];
-  let y = by + bh * 0.27;
-  for (const [t, c, s] of lines) {
-    const fs = Math.round(H * s); ctx.font = `800 ${fs}px -apple-system, system-ui, sans-serif`;
-    ctx.fillStyle = c; ctx.strokeText(t, W / 2, y); ctx.fillText(t, W / 2, y);
-    y += bh * 0.26;
-  }
-  if (best > 0) { ctx.fillStyle = "#fff"; ctx.font = `700 ${Math.round(H * 0.03)}px -apple-system, system-ui, sans-serif`; ctx.fillText("Best: " + best, W / 2, by + bh * 0.95); }
+  ctx.lineWidth = Math.max(2, H * 0.006); ctx.strokeStyle = "rgba(0,0,0,0.55)";
+  ctx.fillStyle = "#f6fbff"; ctx.font = `800 ${Math.round(H*0.036)}px -apple-system, system-ui, sans-serif`;
+  ctx.strokeText("Hold to climb  ·  release to dive", W/2, H*0.405); ctx.fillText("Hold to climb  ·  release to dive", W/2, H*0.405);
   ctx.restore();
-  drawFlightKitCard(); drawJourneyMap(true);
+  if (worldsCleared > 0) {
+    // veterans get the world select; the legend already did its job
+    drawWorldCards();
+  } else {
+    // ---- "What to grab / what to dodge" legend panel (first flights) ----
+    const pw = Math.min(W * 0.84, u * 1.7), ph = H * 0.40, px = (W - pw) / 2, py = H * 0.43;
+    roundedPanel(px, py, pw, ph, u * 0.035, "rgba(8,24,55,0.66)", "rgba(246,251,255,0.30)");
+    ctx.save();
+    const colGood = px + pw*0.07, colBad = px + pw*0.55, icoX = pw*0.05, icoSz = H*0.046;
+    // column headers
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.font = `900 ${Math.round(H*0.03)}px -apple-system, system-ui, sans-serif`;
+    ctx.fillStyle = "#7cffa8"; ctx.fillText("GRAB THESE", colGood, py + ph*0.11);
+    ctx.fillStyle = "#ff8a6b"; ctx.fillText("DODGE THESE", colBad, py + ph*0.11);
+    const good = [["fish","Points"],["shield","Blocks one hit"],["star","Smash everything"],["magnet","Pulls fish in"],["slow","Slows the world"],["ice","Boss: stock up, then FIRE"]];
+    const bad = [[["seal","ufo","balloon"],"Flying critters..."],[["bird","snowball","storm"],"...all dodge them!"],["bolt","Boss shots & parts"],["ring","Fly through the hole, not the ring"]];
+    const drawCol = (rows, cx) => {
+      rows.forEach((r, i) => {
+        const ry = py + ph*0.24 + i*ph*0.115;
+        const icons = Array.isArray(r[0]) ? r[0] : [r[0]];
+        icons.forEach((ic, j) => drawLegendIcon(ic, cx + icoSz*0.5 + j*icoSz*0.92, ry, icoSz));
+        const lx = cx + icoSz*(0.5 + (icons.length - 1)*0.92) + icoSz*0.7;
+        ctx.fillStyle = "#f6fbff"; ctx.font = `700 ${Math.round(H*0.024)}px -apple-system, system-ui, sans-serif`;
+        ctx.fillText(r[1], lx, ry);
+      });
+    };
+    drawCol(good, colGood);
+    drawCol(bad, colBad);
+    ctx.restore();
+  }
+  // start prompt + best + cleared badge
+  ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = Math.max(2, H * 0.006); ctx.strokeStyle = "rgba(0,0,0,0.55)";
+  ctx.fillStyle = "#ffd34d"; ctx.font = `900 ${Math.round(H*0.04)}px -apple-system, system-ui, sans-serif`;
+  const prompt = worldsCleared > 0 ? "Tap a world to fly!" : "Tap / Click / Spacebar to start";
+  ctx.strokeText(prompt, W/2, H*0.885); ctx.fillText(prompt, W/2, H*0.885);
+  let yb = H*0.93;
+  if (best > 0) { ctx.fillStyle = "#fff"; ctx.font = `700 ${Math.round(H*0.028)}px -apple-system, system-ui, sans-serif`; ctx.fillText("Best: " + best, W/2, yb); yb += H*0.038; }
+  if (worldsCleared > 0) {
+    ctx.fillStyle = "#ffd34d"; ctx.font = `800 ${Math.round(H*0.026)}px -apple-system, system-ui, sans-serif`;
+    ctx.fillText(worldsCleared >= 3 ? "★★★ ALL WORLDS CLEARED! ★★★" : "★".repeat(worldsCleared) + " World " + worldsCleared + " cleared", W/2, yb);
+  }
+  ctx.restore();
+}
+/* ---- world select (title screen once World 1 has been cleared) ---- */
+const WORLD_INFO = {
+  1: { name: "SUNNY SKIES",  foe: "The Cruiser Gun" },
+  2: { name: "STORM RUN",    foe: "The Gun Deck" },
+  3: { name: "DREADNOUGHT",  foe: "The Final Ship" },
+};
+function worldCardRects() {
+  const gap = W * 0.025, cw = Math.min(W * 0.27, H * 0.40), chh = cw * 1.06;
+  const total = cw * 3 + gap * 2, x0 = (W - total) / 2, y = H * 0.42;
+  return [1, 2, 3].map(n => ({ n, x: x0 + (n - 1) * (cw + gap), y, w: cw, h: chh }));
+}
+function worldCardHit(px, py) {
+  if (worldsCleared === 0) return null;
+  for (const c of worldCardRects()) {
+    if (px >= c.x && px <= c.x + c.w && py >= c.y && py <= c.y + c.h) {
+      return c.n <= worldsCleared + 1 ? c.n : null;   // locked cards don't start
+    }
+  }
+  return null;
+}
+function drawWorldCards() {
+  const next = Math.min(worldsCleared + 1, 3);
+  for (const c of worldCardRects()) {
+    const unlocked = c.n <= worldsCleared + 1, cleared = c.n <= worldsCleared, isNext = c.n === next;
+    ctx.save();
+    roundedPanel(c.x, c.y, c.w, c.h, c.w * 0.07, "rgba(8,24,55,0.78)", isNext ? "#ffd34d" : "rgba(246,251,255,0.35)");
+    // boss portrait fills the top of the card
+    const card = ASSETS.bossCards[c.n];
+    const ix = c.x + c.w * 0.06, iy = c.y + c.h * 0.06, iw = c.w * 0.88, ih = c.h * 0.62;
+    if (card && card.ok) {
+      const s = Math.max(iw / card.width, ih / card.height);
+      const sw = iw / s, sh = ih / s;
+      ctx.save();
+      roundRect(ix, iy, iw, ih, c.w * 0.05); ctx.clip();
+      ctx.drawImage(card, (card.width - sw) / 2, (card.height - sh) / 2, sw, sh, ix, iy, iw, ih);
+      ctx.restore();
+    }
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "#7fd0ff"; ctx.font = `900 ${Math.round(c.h*0.055)}px -apple-system, system-ui, sans-serif`;
+    ctx.fillText("WORLD " + c.n, c.x + c.w/2, c.y + c.h*0.755);
+    ctx.fillStyle = "#f6fbff"; ctx.font = `900 ${Math.round(c.h*0.065)}px -apple-system, system-ui, sans-serif`;
+    ctx.fillText(WORLD_INFO[c.n].name, c.x + c.w/2, c.y + c.h*0.83);
+    ctx.fillStyle = cleared ? "#ffd34d" : "#9fb6d8"; ctx.font = `750 ${Math.round(c.h*0.048)}px -apple-system, system-ui, sans-serif`;
+    ctx.fillText(cleared ? "★ CLEARED — fly again!" : isNext ? "NEXT UP!" : WORLD_INFO[c.n].foe, c.x + c.w/2, c.y + c.h*0.915);
+    if (!unlocked) {   // locked veil + padlock
+      roundedPanel(c.x, c.y, c.w, c.h, c.w * 0.07, "rgba(8,16,34,0.72)", "rgba(246,251,255,0.2)");
+      ctx.fillStyle = "#f6fbff"; ctx.font = `900 ${Math.round(c.h*0.2)}px -apple-system, system-ui, sans-serif`;
+      ctx.fillText("🔒", c.x + c.w/2, c.y + c.h*0.42);
+      ctx.font = `800 ${Math.round(c.h*0.05)}px -apple-system, system-ui, sans-serif`;
+      ctx.fillText("Beat World " + (c.n - 1) + " to unlock", c.x + c.w/2, c.y + c.h*0.6);
+    }
+    ctx.restore();
+  }
 }
 function drawTutorial() {
   if (state !== STATE.PLAYING || tutorialStep >= 3 && tutorialT <= 0) return;
-  const messages = ["HOLD TO CLIMB  •  RELEASE TO DIVE", "AIM THROUGH THE GOLDEN CENTER", "COLLECT FISH  •  GRAB THE BLUE SHIELD", "FINISH MISSIONS TO EARN BADGES!"];
+  const messages = ["HOLD TO CLIMB  •  RELEASE TO DIVE", "AIM THROUGH THE GOLDEN CENTER", "COLLECT FISH  •  GRAB THE BLUE SHIELD", "BEAT BOSSES TO CLEAR WORLDS!"];
   const msg=messages[tutorialStep], u=Math.min(H,W*.75), w=Math.min(W*.78,u*.9), h=u*.075, x=(W-w)/2, y=H-h-u*.035;
   ctx.save();ctx.globalAlpha=tutorialT<.5?Math.max(0,tutorialT/.5):1;roundedPanel(x,y,w,h,h/2,"rgba(16,42,86,.88)","rgba(246,251,255,.75)");ctx.fillStyle=tutorialStep===3?"#ffd34d":"#f6fbff";ctx.textAlign="center";ctx.textBaseline="middle";ctx.font=`900 ${Math.round(u*.024)}px -apple-system,system-ui,sans-serif`;ctx.fillText(msg,W/2,y+h/2);ctx.restore();
-}
-function drawMissionHud(){
-  const m=currentMission(),u=Math.min(H,W*.72),w=Math.min(W*.30,u*.50),h=u*.09,x=H*.025,y=H*.025;
-  ctx.save();roundedPanel(x,y,w,h,h*.22,"rgba(16,42,86,.84)","rgba(246,251,255,.45)");ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillStyle="#ffd34d";ctx.font=`900 ${Math.round(u*.018)}px -apple-system,system-ui,sans-serif`;ctx.fillText("FLIGHT MISSION",x+h*.18,y+h*.28);ctx.fillStyle="#f6fbff";ctx.font=`750 ${Math.round(u*.020)}px -apple-system,system-ui,sans-serif`;ctx.fillText(m.label,x+h*.18,y+h*.57);
-  const bx=x+h*.18,by=y+h*.78,bw=w-h*.36,bh=h*.09;ctx.fillStyle="rgba(255,255,255,.18)";roundRect(bx,by,bw,bh,bh/2);ctx.fill();ctx.fillStyle="#ffd34d";roundRect(bx,by,bw*clamp(missionProgress/m.goal,0,1),bh,bh/2);ctx.fill();ctx.textAlign="right";ctx.fillStyle="#f6fbff";ctx.font=`800 ${Math.round(u*.016)}px -apple-system,system-ui,sans-serif`;ctx.fillText(`${missionProgress}/${m.goal}`,x+w-h*.16,y+h*.28);ctx.restore();
 }
 function drawJourneyMap(full){
   const names=["COAST","SUNSET","AURORA","PEAKS","SPACE"],u=Math.min(H,W*.72),w=full?Math.min(W*.58,u*.92):Math.min(W*.52,u*.76),h=u*(full ? .13 : .105),x=full?W*.39:(W-w)/2,y=full?H*.79:H*.19;
@@ -1771,10 +1854,45 @@ function drawJourneyMap(full){
   for(let i=0;i<5;i++){const nx=lerp(left,right,i/4),done=i<=world;ctx.fillStyle=done?"#ffd34d":(full?"#cad4d8":"#385473");ctx.beginPath();ctx.arc(nx,cy,h*.115,0,7);ctx.fill();ctx.strokeStyle="#102a56";ctx.lineWidth=h*.025;ctx.stroke();if(full){ctx.fillStyle="#102a56";ctx.textAlign="center";ctx.font=`850 ${Math.round(h*.11)}px -apple-system,system-ui,sans-serif`;ctx.fillText(names[i],nx,y+h*.84);}}
   const px=lerp(left,right,world/4);ctx.fillStyle="#ff7a45";ctx.beginPath();ctx.moveTo(px,cy-h*.26);ctx.lineTo(px-h*.10,cy-h*.42);ctx.lineTo(px+h*.10,cy-h*.42);ctx.closePath();ctx.fill();ctx.restore();
 }
-function drawFlightKitCard(){
-  const kit=FLIGHT_KITS[selectedKit],u=Math.min(H,W*.72),x=W*.035,y=H*.72,w=W*.29,h=u*.14;ctx.save();roundedPanel(x,y,w,h,h*.16,"rgba(246,240,216,.95)","#102a56");drawMissionSprite("badge",x+h*.48,y+h*.5,h*.72);ctx.textAlign="left";ctx.textBaseline="middle";ctx.fillStyle="#ff7a45";ctx.font=`900 ${Math.round(u*.017)}px -apple-system,system-ui,sans-serif`;ctx.fillText(`FLIGHT KIT  •  ${badges} BADGES`,x+h*.92,y+h*.25);ctx.fillStyle="#102a56";ctx.font=`900 ${Math.round(u*.035)}px -apple-system,system-ui,sans-serif`;ctx.fillText(kit.name,x+h*.92,y+h*.56);ctx.font=`750 ${Math.round(u*.016)}px -apple-system,system-ui,sans-serif`;ctx.fillText("TAP HERE TO CHANGE",x+h*.92,y+h*.82);ctx.restore();
+/* The "distance to Boss 1" meter shown during the World 1 approach: a bar that
+   fills as you fly, with the penguin chasing a red boss marker at the far end. */
+function drawBossMeter(){
+  if(bossActive||bossBeaten)return;
+  const f=approachFrac();
+  const w=Math.min(W*.46,H*.66),h=H*.024,x=(W-w)/2,y=H*.05;
+  ctx.save();
+  ctx.fillStyle="rgba(8,22,48,.5)";roundRect(x-h*.5,y-h*.5,w+h,h*2.05,h*.8);ctx.fill();
+  // track + fill
+  ctx.fillStyle="rgba(255,255,255,.20)";roundRect(x,y,w,h,h/2);ctx.fill();
+  ctx.fillStyle="#ffd34d";roundRect(x,y,Math.max(h,w*f),h,h/2);ctx.fill();
+  // boss marker (far right) — a red badge that the bar climbs toward
+  ctx.fillStyle="#ff4133";ctx.strokeStyle="#fff";ctx.lineWidth=Math.max(1.5,h*.12);
+  ctx.beginPath();ctx.arc(x+w,y+h*.5,h*.85,0,7);ctx.fill();ctx.stroke();
+  // penguin marker at the fill point
+  ctx.fillStyle="#f6fbff";ctx.beginPath();ctx.arc(x+Math.max(h,w*f),y+h*.5,h*.5,0,7);ctx.fill();
+  // label
+  ctx.fillStyle="#f6fbff";ctx.textAlign="center";ctx.textBaseline="top";
+  ctx.font=`800 ${Math.round(h*.78)}px -apple-system,system-ui,sans-serif`;
+  ctx.fillText(f<.99?"WORLD "+level+" \u2014 FLYING TO THE BOSS":"BOSS INCOMING!",W/2,y+h*1.1);
+  ctx.restore();
 }
-function drawBossAmmo(){if(!bossActive)return;const u=Math.min(H,W*.72),x=W-u*.31,y=H-u*.115;ctx.save();roundedPanel(x,y,u*.27,u*.075,u*.035,"rgba(16,42,86,.88)","rgba(127,208,255,.8)");for(let i=0;i<3;i++)drawMissionSprite("ice",x+u*(.045+i*.055),y+u*.037,u*.055,0,i<bossAmmo?1:.2);ctx.fillStyle="#f6fbff";ctx.textAlign="right";ctx.textBaseline="middle";ctx.font=`850 ${Math.round(u*.018)}px -apple-system,system-ui,sans-serif`;ctx.fillText(bossAmmo?"TAP TO FIRE":"FIND ICE FISH",x+u*.255,y+u*.038);ctx.restore();}
+function drawFireButton(){
+  if(!bossActive)return;
+  const b=fireButton(),hot=bossAmmo>0;
+  ctx.save();
+  // round button — bright when loaded, dim when empty
+  ctx.fillStyle=hot?"rgba(255,122,69,.92)":"rgba(16,42,86,.5)";
+  ctx.strokeStyle=hot?"#fff":"rgba(246,251,255,.5)";ctx.lineWidth=Math.max(2,b.r*.09);
+  ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,7);ctx.fill();ctx.stroke();
+  drawMissionSprite("ice",b.x,b.y-b.r*.05,b.r*1.2,0,hot?1:.35);
+  // stored-count badge (top-right of the button)
+  ctx.fillStyle=hot?"#102a56":"#5b6b82";ctx.beginPath();ctx.arc(b.x+b.r*.72,b.y-b.r*.72,b.r*.44,0,7);ctx.fill();
+  ctx.fillStyle="#fff";ctx.textAlign="center";ctx.textBaseline="middle";ctx.font=`900 ${Math.round(b.r*.52)}px -apple-system,system-ui,sans-serif`;ctx.fillText(String(bossAmmo),b.x+b.r*.72,b.y-b.r*.7);
+  // label under the button
+  ctx.fillStyle="#fff";ctx.strokeStyle="rgba(0,0,0,.45)";ctx.lineWidth=Math.max(2,b.r*.045);ctx.textBaseline="top";ctx.font=`900 ${Math.round(b.r*.34)}px -apple-system,system-ui,sans-serif`;
+  const lab=hot?"FIRE":"GET ICE FISH";ctx.strokeText(lab,b.x,b.y+b.r*1.08);ctx.fillText(lab,b.x,b.y+b.r*1.08);
+  ctx.restore();
+}
 function drawDirectionControls(){
   if(!touchCapable||state!==STATE.PLAYING)return;const d=directionButtons();ctx.save();
   for(const [kind,b] of Object.entries(d)){const down=kind==="left"?steeringLeft:steeringRight;ctx.fillStyle=down?"rgba(255,211,77,.88)":"rgba(16,42,86,.62)";ctx.strokeStyle=down?"#102a56":"rgba(246,251,255,.72)";ctx.lineWidth=Math.max(2,H*.005);ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,7);ctx.fill();ctx.stroke();ctx.fillStyle=down?"#102a56":"#f6fbff";ctx.beginPath();const s=b.r*.44,dir=kind==="left"?-1:1;ctx.moveTo(b.x+dir*s,b.y);ctx.lineTo(b.x-dir*s*.45,b.y-s);ctx.lineTo(b.x-dir*s*.45,b.y+s);ctx.closePath();ctx.fill();}
@@ -1831,7 +1949,7 @@ function frame(now) {
 
   if(nearMissT>0&&!reducedMotion){ctx.save();ctx.globalAlpha=nearMissT*.5;ctx.strokeStyle="#ff7a45";ctx.lineWidth=H*.035;ctx.strokeRect(0,0,W,H);ctx.restore();}
 
-  if (state === STATE.PLAYING) { drawScore(); drawMissionHud(); drawBossEntrance(); drawBanner(); drawBossHud(); drawBossAmmo(); drawTutorial(); drawDirectionControls(); if(mapT>0)drawJourneyMap(false); }
+  if (state === STATE.PLAYING) { drawScore(); drawBossMeter(); drawBossEntrance(); drawBanner(); drawBossHud(); drawFireButton(); drawTutorial(); drawDirectionControls(); if(mapT>0)drawJourneyMap(false); }
   else if (state === STATE.STORY) {
     drawStoryPanel();
   }
@@ -1839,11 +1957,12 @@ function frame(now) {
     drawTitleScreen();
   } else if (state === STATE.WIN) {
     drawScore();
-    panel("YOU MADE IT!", [
-      { text: "You beat the Dreadnought!", color: "#ffd34d", big: true },
-      { text: "Final Score: " + score, big: true },
+    const foes = { 1: "Captain Albatross's gun", 2: "the Gun Deck", 3: "the mighty Dreadnought" };
+    panel(level >= 3 ? "YOU SAVED THE SKIES!" : "WORLD " + level + " CLEARED!", [
+      { text: "You beat " + (foes[level] || foes[1]) + "!", color: "#ffd34d", big: true },
+      { text: "Score: " + score, big: true },
       { text: "Best: " + best, color: "#ffd34d" },
-      { text: "Flight badges: " + badges, color: "#7fd0ff" },
+      { text: level < 3 ? "WORLD " + (level + 1) + " UNLOCKED!" : "Every boss is beaten. Wow!", color: "#7fd0ff" },
       { text: "" },
       { text: "Tap to fly again" },
     ]);
