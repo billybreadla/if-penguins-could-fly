@@ -3,9 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-<meta name="theme-color" content="#102a56" />
+<meta name="theme-color" content="#1c66b8" />
 <title>If Penguins Could Fly</title>
-<link rel="icon" href="images/heropenguin.png" />
+<link rel="icon" href="images/icon-192.png" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="apple-touch-icon" href="images/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Penguins Fly" />
 <style>
   html, body {
     margin: 0; padding: 0; height: 100%; overflow: hidden;
@@ -89,6 +94,11 @@ const CONFIG = {
   world2Time:     52,   // World 2: storm run → the Gun Deck
   world3Time:     58,   // World 3: final approach → the full Dreadnought
   bossDuration:  32,    // seconds you must survive before boss 1 goes down
+
+  // --- medals (end-of-run rank, by score) ---
+  medalBronze:   60,
+  medalSilver:  150,
+  medalGold:    300,
   level2SpeedCap: 0.98, // keep the side-scroll exciting without becoming a blur
   level3SpeedCap: 1.02,
   boss2EntryTime:  3.4, // long readable entrance before the Dreadnought becomes active
@@ -179,6 +189,18 @@ const ASSETS = {
     2: loadImg("images/boss-card-gun-deck-v5.webp"),
     3: loadImg("images/boss-card-dreadnought-v5.webp"),
   },
+  // --- V6 art (Codex): battle damage, medals, victory lap ---
+  bossDmg: {                                             // [damaged, wrecked] per boss level
+    1: [loadImg("images/boss-damaged.webp"), loadImg("images/boss-wrecked.webp")],
+    2: [loadImg("images/gun-deck-damaged.webp"), loadImg("images/gun-deck-wrecked.webp")],
+    3: [loadImg("images/dreadnought-damaged.webp"), loadImg("images/dreadnought-wrecked.webp")],
+  },
+  medals: {
+    bronze: loadImg("images/medal-bronze.webp"),
+    silver: loadImg("images/medal-silver.webp"),
+    gold:   loadImg("images/medal-gold.webp"),
+  },
+  victory: loadImg("images/victory-penguin-v6.webp"),
 };
 const ADVENTURE_FRAMES = {
   star:   { x: 0, w: 434 }, magnet: { x: 434, w: 434 }, slow: { x: 868, w: 434 },
@@ -912,6 +934,17 @@ function checkBiome() {
    world's boss appears. Survive its bolts (and the plane chunks it hurls as
    it gets wrecked) for its duration — or speed things up by firing stocked
    ice fish. Outlast it and it spins down: world cleared. */
+function medalFor(sc) {
+  return sc >= CONFIG.medalGold ? "gold" : sc >= CONFIG.medalSilver ? "silver" : sc >= CONFIG.medalBronze ? "bronze" : null;
+}
+/* boss art swaps to damaged -> wrecked as the fight progresses (V6 art) */
+function bossDamageImg() {
+  if (!boss) return null;
+  const frac = clamp(bossT / boss.dur, 0, 1);
+  const set = ASSETS.bossDmg[boss.level >= 3 ? 3 : boss.level === 2 ? 2 : 1];
+  const pick = frac >= 0.66 ? set[1] : frac >= 0.33 ? set[0] : null;
+  return pick && pick.ok ? pick : null;
+}
 function startBoss(lvl) {
   lvl = lvl || 1;
   bossActive = true; bossPhase = 1; bossT = 0; bossShootCd = 0; bossPartsThrown = 0;
@@ -1006,6 +1039,18 @@ function updateBoss(dt, ws, phh) {
     if (boss.enterT <= 0) { bossPhase = 2; bossShootCd = boss.firstShotDelay; banner = boss.level>=2 ? "GET READY — SHE'S MOVING IN!" : "GRAB ICE FISH — HIT FIRE TO SHOOT!"; bannerT = 3.2; }
   } else if (bossPhase === 2) {                           // FIGHT
     bossT += dt;
+    // visible battle damage: shake + sparks when the ship crosses into a
+    // new damage stage (the art swap itself happens in drawBoss)
+    const dmgTier = bossT / boss.dur >= 0.66 ? 2 : bossT / boss.dur >= 0.33 ? 1 : 0;
+    if (dmgTier !== (boss.dmgTier || 0)) {
+      boss.dmgTier = dmgTier;
+      if (dmgTier > 0) {
+        shakeT = Math.max(shakeT, 0.45);
+        burst("spark", boss.x, boss.y, 26, { color: "#ffb35a", spMax: 0.85, grav: 0.25, lifeMax: 0.9 });
+        banner = dmgTier === 2 ? "IT'S FALLING APART!" : "IT'S CRACKING!"; bannerT = 2.2;
+        SFX.boom();
+      }
+    }
     const frac = clamp(bossT / T, 0, 1);
     boss.smoke = frac;
     const rm=boss.level>=3 ? .38 : boss.level>=2 ? .58 : 1;
@@ -1503,7 +1548,7 @@ function drawBoss() {
   }
   ctx.save();
   ctx.translate(boss.x, boss.y); ctx.rotate(boss.angle || 0);
-  const img = boss.sprite || ASSETS.boss;
+  const img = bossDamageImg() || boss.sprite || ASSETS.boss;
   // dark glowing barrel-mouth filling the bore so the cannon reads solid
   const bx = boss.w * boss.muzX, by = boss.h * boss.muzY, brx = boss.w * boss.muzRx, bry = boss.h * boss.muzRy;
   const bore = ctx.createRadialGradient(bx, by, 1, bx, by, bry);
@@ -1967,6 +2012,10 @@ function frame(now) {
       { text: "Tap to fly again" },
     ]);
     drawMissionSprite("festival",W*.82,H*.25,H*.24,-.08);
+    if (ASSETS.victory && ASSETS.victory.ok) {
+      const vw = H * 0.34, vh = vw * (ASSETS.victory.height / ASSETS.victory.width);
+      ctx.drawImage(ASSETS.victory, W * 0.16 - vw / 2, H * 0.16, vw, vh);
+    }
   } else if (state === STATE.OVER) {
     drawScore();
     panel("Game Over", [
@@ -1976,6 +2025,22 @@ function frame(now) {
       { text: diedAtBoss ? "Your boss checkpoint is saved" : "Tap to play again", color: diedAtBoss ? "#ff8a3d" : "#fff" },
       { text: "" },
     ]);
+    const med = medalFor(score);
+    if (med) {
+      const mimg = ASSETS.medals[med];
+      if (mimg && mimg.ok) {
+        const ms = H * 0.2, mh = ms * (mimg.height / mimg.width);
+        ctx.drawImage(mimg, W * 0.82 - ms / 2, H * 0.2, ms, mh);
+        ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillStyle = med === "gold" ? "#ffd34d" : med === "silver" ? "#e8eef6" : "#e0995a";
+        ctx.font = `900 ${Math.round(H*0.032)}px -apple-system, system-ui, sans-serif`;
+        ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = Math.max(2, H*0.005);
+        const label = med.toUpperCase() + " MEDAL!";
+        ctx.strokeText(label, W * 0.82, H * 0.2 + mh + H * 0.03);
+        ctx.fillText(label, W * 0.82, H * 0.2 + mh + H * 0.03);
+        ctx.restore();
+      }
+    }
     if(diedAtBoss)drawContinueBossButton();
   }
   requestAnimationFrame(frame);
@@ -1984,6 +2049,11 @@ function frame(now) {
 resize();
 reset();
 requestAnimationFrame(frame);
+
+/* ---- PWA: offline play once installed (no-op when opened as a file) ---- */
+if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
+  window.addEventListener("load", function () { navigator.serviceWorker.register("sw.js"); });
+}
 </script>
 </body>
 </html>
