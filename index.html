@@ -343,6 +343,7 @@ let panicT, panicIdx;
 let perfectStreak = 0, perfectTotal = 0, nearMissT = 0;
 let approachT = 0;                       // seconds flown so far this run (drives the Boss 1 meter + trigger)
 let mapT = 0, bossAmmo = 0, bossSupplyCd = 0;
+let paused = false, rafId = 0;
 
 best = parseInt(localStorage.getItem("ipcf_best") || "0", 10) || 0;
 // persisted world progress: 0 = none cleared, 3 = all bosses beaten
@@ -450,6 +451,44 @@ function attachItems(r) {
   maybeSpawnPower(r.x + H * CONFIG.ringSpacing * 0.5, r.cy + (Math.random() * 2 - 1) * H * 0.14);
 }
 function haptic(ms) { if (!reducedMotion && navigator.vibrate) navigator.vibrate(ms); }
+function pauseButtonRect() {
+  const s = Math.max(48, H * 0.09);
+  return { x: Math.max(12, H * 0.035), y: Math.max(12, H * 0.035), w: s, h: s };
+}
+function pauseButtonHit(px, py) {
+  if (state !== STATE.PLAYING) return false;
+  const b = pauseButtonRect();
+  return px >= b.x - sHitPad() && px <= b.x + b.w + sHitPad() &&
+         py >= b.y - sHitPad() && py <= b.y + b.h + sHitPad();
+}
+function sHitPad() { return Math.max(8, H * 0.015); }
+function resumeButtonHit(px, py) {
+  const r = Math.max(68, H * 0.12), cx = W / 2, cy = H / 2 + H * 0.085;
+  return Math.hypot(px - cx, py - cy) <= r * 1.22;
+}
+function requestFrame() {
+  if (!rafId && !paused) rafId = requestAnimationFrame(frame);
+}
+function cancelFrame() {
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = 0;
+}
+function setPaused(next) {
+  next = !!next;
+  if (state !== STATE.PLAYING || isPortrait) return paused;
+  if (paused === next) return paused;
+  paused = next;
+  holding = false; steeringLeft = false; steeringRight = false;
+  flightTouchIds.clear(); leftTouchId = rightTouchId = null;
+  if (paused) {
+    cancelFrame();
+    drawPauseOverlay();
+  } else {
+    last = performance.now();
+    requestFrame();
+  }
+  return paused;
+}
 /* per-world approach: seconds of flight before that world's boss shows up */
 function worldTime(n) { return n >= 3 ? CONFIG.world3Time : n === 2 ? CONFIG.world2Time : CONFIG.world1Time; }
 /* how far along this world's approach we are (0..1) — drives the boss meter + cloud darkening */
@@ -507,6 +546,11 @@ function continueBoss() {
 function press(px, py) {
   audioInit();
   if (isPortrait) return;
+  if (paused) {
+    if (resumeButtonHit(px, py) || pauseButtonHit(px, py)) setPaused(false);
+    return;
+  }
+  if (state === STATE.PLAYING && px != null && pauseButtonHit(px, py)) { setPaused(true); return; }
   if (state === STATE.STORY) {
     storyPage++;
     if (storyPage >= 3) { storyPage = 0; state = STATE.READY; localStorage.setItem("ipcf_story_seen", "1"); }
@@ -546,6 +590,7 @@ window.addEventListener("mouseup", () => release());
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
   for(const t of e.changedTouches){
+    if(paused){press(t.clientX,t.clientY);continue;}
     if(handleMuteTap(t.clientX,t.clientY))continue;
     if(state===STATE.PLAYING&&fireHit(t.clientX,t.clientY)){fireFriendlyShot();continue;}
     const dir=state===STATE.PLAYING?directionHit(t.clientX,t.clientY):null;
@@ -558,6 +603,11 @@ function endTouches(e){e.preventDefault();for(const t of e.changedTouches){if(t.
 window.addEventListener("touchend",endTouches,{passive:false});
 window.addEventListener("touchcancel",endTouches,{passive:false});
 window.addEventListener("keydown", (e) => {
+  if (paused) {
+    if (e.code === "KeyP" || e.code === "Escape" || e.code === "Space" || e.code === "Enter") { e.preventDefault(); setPaused(false); }
+    return;
+  }
+  if (state === STATE.PLAYING && (e.code === "KeyP" || e.code === "Escape")) { e.preventDefault(); setPaused(true); return; }
   if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); if (!e.repeat) press(); }
   if(e.code==="ArrowLeft"){e.preventDefault();steeringLeft=true;}
   if(e.code==="ArrowRight"){e.preventDefault();steeringRight=true;}
@@ -1669,6 +1719,7 @@ function drawScore() {
   ctx.restore();
   drawPowerHud();
   drawSpeakerIcon(W - H * 0.05, H * 0.05, H * 0.023, muted);
+  drawPauseButton();
 }
 function drawSpeakerIcon(x,y,s,off){
   ctx.save();ctx.translate(x,y);ctx.globalAlpha=off ? .55 : .9;ctx.fillStyle="#f6fbff";ctx.strokeStyle="#102a56";ctx.lineWidth=Math.max(2,s*.18);ctx.lineCap="round";ctx.lineJoin="round";
@@ -1692,6 +1743,41 @@ function drawPowerHud() {
     y += sz * 1.25;
   }
   if (hasShield) drawAdventureSprite("shield", H * 0.04 + sz * 0.3, y, sz * 1.15); // held charge
+}
+function drawPauseButton() {
+  if (state !== STATE.PLAYING) return;
+  const b = pauseButtonRect();
+  ctx.save();
+  roundedPanel(b.x, b.y, b.w, b.h, b.h * 0.28, "rgba(16,42,86,.82)", "rgba(246,251,255,.78)");
+  ctx.fillStyle = "#f6fbff";
+  const barW = b.w * 0.16, barH = b.h * 0.48, gap = b.w * 0.1, y = b.y + (b.h - barH) / 2;
+  roundRect(b.x + b.w / 2 - gap / 2 - barW, y, barW, barH, barW * 0.45); ctx.fill();
+  roundRect(b.x + b.w / 2 + gap / 2, y, barW, barH, barW * 0.45); ctx.fill();
+  ctx.restore();
+}
+function drawPauseOverlay() {
+  ctx.save();
+  ctx.fillStyle = "rgba(8,16,34,.62)";
+  ctx.fillRect(0, 0, W, H);
+  const pw = Math.min(W * 0.78, H * 0.92), ph = Math.min(H * 0.62, 430);
+  const px = (W - pw) / 2, py = (H - ph) / 2;
+  roundedPanel(px, py, pw, ph, Math.min(34, ph * 0.09), "rgba(16,42,86,.93)", "rgba(246,251,255,.72)");
+  roundedPanel(px + pw * 0.045, py + ph * 0.055, pw * 0.91, ph * 0.89, Math.min(26, ph * 0.07), "rgba(246,251,255,.08)", "rgba(255,211,77,.35)");
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffd34d"; ctx.strokeStyle = "rgba(0,0,0,.5)"; ctx.lineWidth = Math.max(4, H * 0.009);
+  ctx.font = `900 ${Math.round(Math.min(H * 0.115, 96))}px -apple-system,system-ui,sans-serif`;
+  ctx.strokeText("PAUSED", W / 2, py + ph * 0.28); ctx.fillText("PAUSED", W / 2, py + ph * 0.28);
+  const r = Math.max(68, H * 0.12), cx = W / 2, cy = H / 2 + H * 0.085;
+  ctx.beginPath(); ctx.arc(cx, cy, r + 9, 0, Math.PI * 2); ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fillStyle = "#ff7a45"; ctx.fill(); ctx.strokeStyle = "#f6fbff"; ctx.lineWidth = Math.max(3, r * 0.07); ctx.stroke();
+  ctx.fillStyle = "#fff"; ctx.beginPath();
+  ctx.moveTo(cx - r * 0.24, cy - r * 0.38);
+  ctx.lineTo(cx + r * 0.36, cy);
+  ctx.lineTo(cx - r * 0.24, cy + r * 0.38);
+  ctx.closePath(); ctx.fill();
+  ctx.font = `800 ${Math.round(Math.min(H * 0.034, 28))}px -apple-system,system-ui,sans-serif`;
+  ctx.fillStyle = "#f6fbff"; ctx.fillText("Tap to keep flying", W / 2, cy + r + H * 0.055);
+  ctx.restore();
 }
 function drawBanner() {
   if (bannerT <= 0) return;
@@ -1959,11 +2045,13 @@ function drawPortraitPrompt() {
 /* ------------------------------- Loop --------------------------------- */
 let last = performance.now();
 function frame(now) {
+  rafId = 0;
+  if (paused) return;
   let dt = (now - last) / 1000; last = now;
   if (dt > 0.05) dt = 0.05;
   if (isPortrait) {
     drawPortraitPrompt();
-    requestAnimationFrame(frame);
+    requestFrame();
     return;
   }
   // keep audio alive: browsers (or another app grabbing sound) can re-suspend
@@ -2043,12 +2131,14 @@ function frame(now) {
     }
     if(diedAtBoss)drawContinueBossButton();
   }
-  requestAnimationFrame(frame);
+  requestFrame();
 }
 
 resize();
 reset();
-requestAnimationFrame(frame);
+requestFrame();
+window.addEventListener("blur", () => { if (state === STATE.PLAYING) setPaused(true); });
+document.addEventListener("visibilitychange", () => { if (document.hidden && state === STATE.PLAYING) setPaused(true); });
 
 /* ---- PWA: offline play once installed (no-op when opened as a file) ---- */
 if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
