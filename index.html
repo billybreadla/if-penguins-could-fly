@@ -66,6 +66,9 @@ const CONFIG = {
   playerX:     0.30,   // horizontal position (fraction of W)
   hitScale:    0.42,   // collision box vs. drawn sprite (smaller = friendlier)
 
+  // --- v7 experiment: baked-3D hero (Blender toy model, tools/model_hero.py + bake_hero_strip.py) ---
+  hero3D:      true,   // false falls back to the painted flight strip
+
   // --- collectibles & scoring ---
   fishValue:   5,      // points per fish (before combo)
   comboWindow: 1.5,    // seconds to chain pickups into a combo
@@ -80,6 +83,10 @@ const CONFIG = {
 
   // --- world ---
   bgScroll:    0.18,   // background parallax speed
+  bgMid:       2.2,    // multiplane midground speed (× bgScroll) — tree line slides faster
+  bgNear:      3.8,    // multiplane foreground speed (× bgScroll) — grass strip whooshes by
+  haze:        0.14,   // aerial-perspective fog pooled on the horizon (fades out in dark worlds)
+  shadow:      0.16,   // soft drop shadows under floating objects (0 turns them off)
   biomeLen:    7,      // rings per sky (sunny → sunset → night → snow → space)
 
   // --- arena 2: the Dusty Hills ---
@@ -133,8 +140,32 @@ const BIOMES = [
 // Arena 2 sky — a hazy, dusty wash that overrides the cycling skies.
 const DUSTY = { wash: [202,150,82, 0.42], dark: 0.06 };
 
+/* Ship-day ritual: what's new this build, newest first. The little "v13" chip
+   in the title screen's corner opens this list so Lachlan can see what changed
+   between ships. Kid-facing strings only! */
+const CHANGELOG = [
+  { v: "14", date: "2026-08-22", notes: [
+    "Race a ghost of your best flight — can you beat yourself?",
+    "Photo mode: pause, pan, zoom and share a postcard of your flight",
+    "Your 3D-printed penguin flies! (baked from the Blender toy)",
+    "Voice lines are ready — record them and Lachlan is the radio",
+  ]},
+  { v: "13", date: "2026-08-22", notes: [
+    "Dino Bob's plush drifts through the sky — bump him for +25!",
+    "Fly with keyboard arrows or plug in a game controller",
+  ]},
+  { v: "7", date: "2026-06-21", notes: [
+    "Multiplane skies: clouds, trees and grass on three layers",
+    "Depth haze and soft shadows make the world feel deep",
+  ]},
+  { v: "5", date: "2026-06-01", notes: [
+    "Every world repainted with brand-new painted art",
+    "Boss portrait cards + animated flight poses",
+  ]},
+];
+
 /* ---- Asset loading: pull from /images/, fall back to drawn shapes ---- */
-const ASSET_VER = 11;  // V5 art overhaul: painted worlds, title art, kit skins, flight anim, boss cards
+const ASSET_VER = 14;  // v8 wave: ghost replays, photo mode, plush, inputs (hero-strip-3d stays v13)
 function loadImg(path) {
   const img = new Image();
   img.ok = false;
@@ -164,6 +195,7 @@ const ASSETS = {
   titleHero: loadImg("images/title-hero-v5.webp"),       // start-screen key art
   wordmark:  loadImg("images/title-wordmark-v5.webp"),   // transparent logo
   heroStrip: loadImg("images/hero-flight-strip-v5.webp"),// 4x 520px flight poses (Classic)
+  heroStrip3D: loadImg("images/hero-strip-3d-v1.webp"),   // v7: same layout, baked from the Blender toy
   worldBg: {                                             // painted sky per world (see activeWorld)
     1: loadImg("images/world-sunset-v5.webp"),
     2: loadImg("images/world-aurora-v5.webp"),
@@ -201,6 +233,22 @@ const ASSETS = {
     gold:   loadImg("images/medal-gold.webp"),
   },
   victory: loadImg("images/victory-penguin-v6.webp"),
+  // --- crossover cameo: Dino Bob's plush (rare bonus collectible, see maybeSpawnPlush) ---
+  dinoPlush: loadImg("images/dino-plush.webp"),
+  // --- V7 depth: world 0 sliced into three parallax planes (tools/slice_bg0.py) ---
+  bg0: {
+    far:  loadImg("images/bg0-far.webp"),    // sky + clouds + mountains
+    mid:  loadImg("images/bg0-mid.webp"),    // tree-line cutout (mountains show through gaps)
+    near: loadImg("images/bg0-near.webp"),   // grass strip + water
+  },
+};
+/* Where each bg0 slice sits on screen (fractions of the source painting's
+   height). All three are cut from the same painting, so one shared
+   px→screen scale — derived from the far band — fits every band. */
+const BG0_BANDS = {
+  far:  { top: 0.00, bot: 0.93 },
+  mid:  { top: 0.78, bot: 0.95 },
+  near: { top: 0.90, bot: 1.00 },
 };
 const ADVENTURE_FRAMES = {
   star:   { x: 0, w: 434 }, magnet: { x: 434, w: 434 }, slow: { x: 868, w: 434 },
@@ -267,6 +315,33 @@ const SFX = {
   shoot:   () => tone(420, 0.06, "square", 0.08, 170),
   boom:    () => { noiseBurst(0.5, 0.5, 700); tone(120, 0.5, "sawtooth", 0.20, 40); },
   alarm:   () => { tone(440, 0.26, "sawtooth", 0.16, 300); setTimeout(() => tone(440, 0.26, "sawtooth", 0.16, 300), 300); },
+};
+
+/* ---- Kids' voice lines: real recordings of Lachlan calling the action ----
+   Each line lives at audio/<name>.mp3 (Voice Memos exports are usually .m4a,
+   so both extensions are probed). A missing file becomes a silent no-op, so
+   lines can be recorded and dropped in one at a time — see
+   tools/VOICE_LINES.md for the radio-chatter scripts. */
+const VOICE = {
+  _pool: {}, _missing: {}, _lastAt: {},
+  _el(name) {
+    const a = new Audio();
+    a.addEventListener("error", () => {          // mp3 miss → try .m4a once, then give up quietly
+      if (a.dataset.triedM4a) this._missing[name] = true;
+      else { a.dataset.triedM4a = "1"; a.src = "audio/" + name + ".m4a"; }
+    });
+    a.src = "audio/" + name + ".mp3";
+    return a;
+  },
+  play(name) {
+    const now = performance.now() / 1000;
+    if (this._lastAt[name] && now - this._lastAt[name] < 4) return;   // throttle same line within 4s
+    if (muted || this._missing[name]) return;                         // master-mute aware / known-missing
+    this._lastAt[name] = now;
+    let a = this._pool[name];
+    if (!a) { a = this._el(name); this._pool[name] = a; }
+    try { a.currentTime = 0; a.play().catch(() => {}); } catch (e) {} // autoplay rules: fail silently
+  },
 };
 
 /* ---- Background music: a light looped melody synthesized in WebAudio ---- */
@@ -344,6 +419,48 @@ let perfectStreak = 0, perfectTotal = 0, nearMissT = 0;
 let approachT = 0;                       // seconds flown so far this run (drives the Boss 1 meter + trigger)
 let mapT = 0, bossAmmo = 0, bossSupplyCd = 0;
 let paused = false, rafId = 0;
+/* ---- Photo Mode + Share Card -------------------------------------------
+   Entered from [PHOTO] on the pause overlay: the run stays `paused` (world,
+   timers and ambient particles all freeze) but the RAF loop keeps running
+   so the camera can pan/zoom live. frame() gates update(dt) behind this
+   flag and swaps every HUD/screen layer for a small photo bar. */
+let photoMode = false;
+const PHOTO_ZOOMS = [1, 1.15, 1.3];       // zoom cycles about screen center
+let photoZoomIdx = 0;
+let photoPan = { x: 0, y: 0 };            // camera pan, CSS px, clamped ±80
+let photoDragId = null;                   // active pan pointer
+let photoDragLast = null;                 // last {x,y} of that pointer
+let photoFlashT = 0;                      // shutter white-flash seconds left
+let photoToast = null;                    // { str, until } — drawn by the photo bar
+/* merged-input state: touch/mouse own `holding` + the steering booleans above;
+   keyboard and gamepad feed these extra signals, and pollInputs() combines
+   everything each frame so physics only ever reads climbAmt/steerAxis */
+let kbHolding = false;                    // Space / ArrowUp held on the keyboard
+const keysDown = new Set();               // held arrow keys → eased analog axis
+let keySteer = 0;                         // keyboard steer axis, eased -1..1
+let gpClimb = 0, gpSteer = 0;             // gamepad stick axes (deadzone-remapped)
+let gpFirePrev = false, gpStartPrev = false;   // edge detectors for A / Start
+let climbAmt = 0, steerAxis = 0;          // THE merged signals the physics reads
+let plush = null;                         // Dino Bob plush bonus (one at a time)
+let whatsNewOpen = false, whatsNewScroll = 0, whatsNewScrollMax = 0, whatsNewDragY = null;
+/* ---- Ghost Replay Races ------------------------------------------------
+   Every run quietly records the pilot's flight path (~8 samples a second,
+   capped at ~3 minutes) while it happens — boss fights included. Finish a
+   run with a new best score for that world and the path is saved, so later
+   runs can race a translucent "ghost" of that best flight. Each sample is
+   [t_ms, x‰ of W, y‰ of H, pitch in centiradians]: rounded ints keep the
+   payload lean, and per-mille coordinates let a ghost recorded at one window
+   size replay correctly at another. */
+const GHOST_SAMPLE_DT = 0.08;       // seconds between recorded samples
+const GHOST_SAMPLE_MAX = 2400;      // hard cap ≈ 3 min of flight, then recording just stops
+let runT = 0;                       // unpaused seconds flown THIS run (the shared ghost clock)
+let lastRecT = 0;                   // run-clock time of the most recent sample
+let ghostRec = [];                  // this run's samples while it records
+let ghostRun = null;                // ghost racing this run {score, samples, ptr, beat}
+let racePending = false;            // RACE tapped on game-over → next reset() loads the ghost
+let ghostStored = {};               // per-world cache of saved ghosts (spare localStorage reads)
+let ghostClearArmedAt = 0;          // CLEAR button double-tap confirm timestamp
+let ghostStripCache = null;         // { src, cv } navy-tinted hero strip, built once
 
 best = parseInt(localStorage.getItem("ipcf_best") || "0", 10) || 0;
 // persisted world progress: 0 = none cleared, 3 = all bosses beaten
@@ -379,6 +496,14 @@ function reset() {
   approachT = 0; mapT = 0;
   bossAmmo = 0; bossSupplyCd = 3.5;
   trailAcc = 0; birdCooldown = H * 2; gustCooldown = H * 1.2;
+  plush = null; climbAmt = 0; steerAxis = 0; keySteer = 0; kbHolding = false; keysDown.clear();
+  // ghost races: every run records fresh; a ghost only rides along when RACE was tapped
+  runT = 0; lastRecT = 0; ghostRec = []; ghostRun = null;
+  if (racePending) {
+    racePending = false;
+    const g = loadGhost(currentWorld);   // each world races its own saved flight
+    if (g) ghostRun = { score: g.score, samples: g.samples, ptr: 0, beat: false };
+  }
   pairNext = false; nextSpacing = CONFIG.ringSpacing; lastGapY = 0.5;
   arena = 1;
   // sky starts fully on biome 0 (no pop-in)
@@ -449,6 +574,14 @@ function attachItems(r) {
   const holeHalf = (H * CONFIG.ringHeight * RING.holeFrac) / 2;
   if (Math.random() < 0.72) spawnFishLine(r.x, r.cy, holeHalf * 0.55);
   maybeSpawnPower(r.x + H * CONFIG.ringSpacing * 0.5, r.cy + (Math.random() * 2 - 1) * H * 0.14);
+  maybeSpawnPlush(r.x);   // the Dino Bob cameo rides the same ring cadence
+}
+/* Crossover collectible: Dino Bob's plush occasionally drifts through as a
+   bonus (~5% per ring once you're past 30 points, never two at once). */
+function maybeSpawnPlush(x) {
+  if (score > 30 && !plush && Math.random() < 0.05) {
+    plush = { x: x + H * CONFIG.ringSpacing * 0.5, baseY: rand(0.2, 0.8) * H, y: 0, p: rand(0, 6.283) };
+  }
 }
 function haptic(ms) { if (!reducedMotion && navigator.vibrate) navigator.vibrate(ms); }
 function pauseButtonRect() {
@@ -466,8 +599,19 @@ function resumeButtonHit(px, py) {
   const r = Math.max(68, H * 0.12), cx = W / 2, cy = H / 2 + H * 0.085;
   return Math.hypot(px - cx, py - cy) <= r * 1.22;
 }
+/* [PHOTO] entry button on the pause overlay — top-right corner pill,
+   mirroring the pause button's geometry and the What's New chip styling. */
+function photoBtnRect() {
+  const s = Math.max(48, H * 0.09), pad = Math.max(12, H * 0.035);
+  return { x: W - pad - s * 1.7, y: pad, w: s * 1.7, h: s };
+}
+function photoBtnHit(px, py) {
+  const b = photoBtnRect();
+  return px >= b.x - sHitPad() && px <= b.x + b.w + sHitPad() &&
+         py >= b.y - sHitPad() && py <= b.y + b.h + sHitPad();
+}
 function requestFrame() {
-  if (!rafId && !paused) rafId = requestAnimationFrame(frame);
+  if (!rafId && (!paused || photoMode)) rafId = requestAnimationFrame(frame);   // photo mode keeps frames alive while paused
 }
 function cancelFrame() {
   if (rafId) cancelAnimationFrame(rafId);
@@ -479,6 +623,7 @@ function setPaused(next) {
   if (paused === next) return paused;
   paused = next;
   holding = false; steeringLeft = false; steeringRight = false;
+  kbHolding = false; keysDown.clear(); keySteer = 0; gpClimb = 0; gpSteer = 0;   // drop every input source
   flightTouchIds.clear(); leftTouchId = rightTouchId = null;
   if (paused) {
     cancelFrame();
@@ -546,7 +691,9 @@ function continueBoss() {
 function press(px, py) {
   audioInit();
   if (isPortrait) return;
+  if (photoMode) { photoPress(px, py); return; }   // photo bar owns every tap while composing a shot
   if (paused) {
+    if (px != null && photoBtnHit(px, py)) { enterPhotoMode(); return; }
     if (resumeButtonHit(px, py) || pauseButtonHit(px, py)) setPaused(false);
     return;
   }
@@ -554,12 +701,20 @@ function press(px, py) {
   if (state === STATE.STORY) {
     storyPage++;
     if (storyPage >= 3) { storyPage = 0; state = STATE.READY; localStorage.setItem("ipcf_story_seen", "1"); }
+    else VOICE.play("story_" + (storyPage + 1));   // Lachlan narrates each page as it turns
   }
   else if (state === STATE.READY) {
     // world select: tap a card to fly that world; anywhere else = next world up
-    if (px != null && worldsCleared > 0) {
-      const hit = worldCardHit(px, py);
-      if (hit) { startWorld(hit); return; }
+    if (px != null) {
+      if (whatsNewOpen) {                          // changelog panel: only BACK responds
+        if (whatsNewBackHit(px, py)) closeWhatsNew();
+        return;
+      }
+      if (whatsNewChipHit(px, py)) { openWhatsNew(); return; }   // Ship Day ritual chip
+      if (worldsCleared > 0) {
+        const hit = worldCardHit(px, py);
+        if (hit) { startWorld(hit); return; }
+      }
     }
     startWorld(Math.min(worldsCleared + 1, 3));
   }
@@ -567,6 +722,7 @@ function press(px, py) {
   else if (state === STATE.WIN && performance.now() - overAt > 350) { reset(); state = STATE.READY; }
   else if (state === STATE.OVER && performance.now() - overAt > 350) {
     if (diedAtBoss) { if(px==null||continueBossHit(px,py))continueBoss(); }
+    else if (px != null && ghostButtonsHit(px, py)) { }   // RACE MY GHOST / CLEAR ate this tap
     else { reset(); state = STATE.READY; }
   }
 }
@@ -579,6 +735,7 @@ function muteBtnHit(px, py) {
   return Math.abs(px - cx) < r && Math.abs(py - cy) < r;
 }
 function handleMuteTap(px, py) {
+  if (paused) return false;   // speaker icon is hidden on the pause/photo overlays; keep the hitbox from eating [PHOTO] taps
   if (!muteBtnHit(px, py)) return false;
   audioInit();
   muted = !muted;
@@ -603,15 +760,22 @@ function endTouches(e){e.preventDefault();for(const t of e.changedTouches){if(t.
 window.addEventListener("touchend",endTouches,{passive:false});
 window.addEventListener("touchcancel",endTouches,{passive:false});
 window.addEventListener("keydown", (e) => {
+  if (whatsNewOpen && e.code === "Escape") { e.preventDefault(); closeWhatsNew(); return; }
   if (paused) {
+    if (photoMode) {   // Esc / P back out of photo mode first, to normal pause
+      if (e.code === "KeyP" || e.code === "Escape") { e.preventDefault(); exitPhotoMode(); }
+      return;
+    }
     if (e.code === "KeyP" || e.code === "Escape" || e.code === "Space" || e.code === "Enter") { e.preventDefault(); setPaused(false); }
     return;
   }
   if (state === STATE.PLAYING && (e.code === "KeyP" || e.code === "Escape")) { e.preventDefault(); setPaused(true); return; }
-  if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); if (!e.repeat) press(); }
-  if(e.code==="ArrowLeft"){e.preventDefault();steeringLeft=true;}
-  if(e.code==="ArrowRight"){e.preventDefault();steeringRight=true;}
-  if ((e.code === "KeyF" || e.code === "Enter") && state === STATE.PLAYING) { e.preventDefault(); fireFriendlyShot(); }
+  // Space/ArrowUp share the touch path's climb signal; kbHolding keeps keyboard
+  // climb alive even if a finger lifts elsewhere (release() only owns `holding`)
+  if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); if (!e.repeat && !kbHolding) { kbHolding = true; press(); } }
+  if(e.code==="ArrowLeft"){e.preventDefault();keysDown.add("L");steeringLeft=true;}
+  if(e.code==="ArrowRight"){e.preventDefault();keysDown.add("R");steeringRight=true;}
+  if ((e.code === "KeyF" || e.code === "Enter") && state === STATE.PLAYING && !e.repeat) { e.preventDefault(); fireFriendlyShot(); }
   if (e.code === "KeyM") { muted = !muted; }
   // R on the game-over screen = full restart from zero (vs. tap = retry the boss)
   if (e.code === "KeyR" && state === STATE.OVER) { reset(); state = STATE.READY; }
@@ -622,9 +786,55 @@ window.addEventListener("keydown", (e) => {
   }
 });
 window.addEventListener("keyup", (e) => {
-  if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); release(); }
-  if(e.code==="ArrowLeft")steeringLeft=false;
-  if(e.code==="ArrowRight")steeringRight=false;
+  if (e.code === "Space" || e.code === "ArrowUp") { e.preventDefault(); kbHolding = false; release(); }
+  if(e.code==="ArrowLeft"){keysDown.delete("L");steeringLeft=false;}
+  if(e.code==="ArrowRight"){keysDown.delete("R");steeringRight=false;}
+});
+
+/* --- Gamepad polling + the merged-input mixer ----------------------------
+   Runs once per frame (cheap). Sticks are deadzone-remapped to a 0..1 analog
+   strength; A (button 0) fires on the press edge only; Start (button 9)
+   toggles pause. Everything funnels into climbAmt / steerAxis below so
+   touch, keyboard, and pad can all be held at once and simply combine. */
+function dz(v) {   // deadzone → remapped analog strength (full throw still = full strength)
+  const a = Math.abs(v), s = v < 0 ? -1 : 1;
+  return a < 0.35 ? 0 : s * Math.min(1, (a - 0.35) / 0.65);
+}
+function pollGamepad() {
+  gpClimb = 0; gpSteer = 0;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const p of pads) {
+    if (!p || !p.connected) continue;
+    gpSteer = clamp(gpSteer + dz(p.axes[0] || 0), -1, 1);    // left stick X → steering
+    gpClimb = Math.max(gpClimb, dz(-(p.axes[1] || 0)));      // stick up → climb (scaled by tilt)
+    const fire = !!(p.buttons[0] && p.buttons[0].pressed);   // A = FIRE bolt (edge, respects ammo)
+    if (fire && !gpFirePrev && state === STATE.PLAYING && !paused) fireFriendlyShot();
+    gpFirePrev = fire;
+    const start = !!(p.buttons[9] && p.buttons[9].pressed);  // Start = pause toggle (edge)
+    if (start && !gpStartPrev && state === STATE.PLAYING) {
+      if (photoMode) exitPhotoMode();        // Start inside photo mode exits the camera first
+      else setPaused(!paused);
+    }
+    gpStartPrev = start;
+  }
+}
+function pollInputs(dt) {
+  pollGamepad();
+  // keyboard arrows ease toward ±1 for an analog feel, then settle back to 0
+  const kt = (keysDown.has("R") ? 1 : 0) - (keysDown.has("L") ? 1 : 0);
+  keySteer += (kt - keySteer) * Math.min(1, dt * 9);
+  if (!kt && Math.abs(keySteer) < 0.02) keySteer = 0;
+  // final merge: digital buttons win ties, analog sources stack underneath
+  climbAmt = Math.max((holding || kbHolding) ? 1 : 0, gpClimb);
+  steerAxis = clamp((steeringRight ? 1 : 0) - (steeringLeft ? 1 : 0) + keySteer + gpSteer, -1, 1);
+}
+// tiny toast when a controller pairs in (drawn by the floating-text system)
+window.addEventListener("gamepadconnected", () => {
+  texts.push({ x: W / 2, y: H * 0.3, str: "\uD83C\uDFAE Controller connected!", color: "#7fd0ff", scale: 1.1, life: reducedMotion ? 1.6 : 2.2, max: 2.2 });
+});
+window.addEventListener("gamepaddisconnected", () => {
+  gpFirePrev = gpStartPrev = false;
+  texts.push({ x: W / 2, y: H * 0.3, str: "\uD83C\uDFAE Controller bye!", color: "#9fb6d8", scale: 1, life: 1.6, max: 1.6 });
 });
 // belt-and-suspenders: any interaction anywhere keeps the audio context awake
 ["pointerdown", "touchstart", "keydown"].forEach((ev) =>
@@ -668,7 +878,8 @@ function gameOver() {
   SFX.crash();
   burst("feather", player.x, player.y, 18, { color: "#fff", spMax: 0.7, lifeMax: 1.1 });
   burst("feather", player.x, player.y, 10, { color: "#222", spMax: 0.7, lifeMax: 1.1 });
-  if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); }
+  if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); VOICE.play("new_best"); }
+  storeGhostIfBest();   // even a crashed run can be a record flight — save the path
 }
 
 function consumeShield(x, y) {   // 🛡️ pops, soaks one hit, gives a brief invuln window
@@ -715,12 +926,13 @@ function update(dt) {
   const inv = starT > 0 || graceT > 0;   // invincible during the star AND its grace tail
 
   // physics (player is NOT slowed — slow-mo only eases the world)
-  player.vy += (holding ? -CONFIG.lift : CONFIG.gravity) * H * dt;
+  // climbAmt merges touch/mouse `holding`, keyboard hold, and gamepad tilt
+  // (analog pads get proportional lift; 1 = exactly the old full climb)
+  player.vy += lerp(CONFIG.gravity, -CONFIG.lift, climbAmt) * H * dt;
   player.vy -= player.vy * CONFIG.drag * dt;   // air resistance: bleeds off momentum so it glides & floats at the top of each tap
   player.vy = clamp(player.vy, -CONFIG.maxClimb * H, CONFIG.maxFall * H);
   player.y += player.vy * dt;
-  const sideInput=(steeringRight?1:0)-(steeringLeft?1:0);
-  player.vx += sideInput*CONFIG.sideAccel*H*dt;
+  player.vx += steerAxis*CONFIG.sideAccel*H*dt;   // steerAxis merges touch buttons + keys + stick
   player.vx -= player.vx*CONFIG.sideDrag*dt;
   player.vx=clamp(player.vx,-CONFIG.maxSide*H,CONFIG.maxSide*H);
   player.x+=player.vx*dt;
@@ -729,6 +941,20 @@ function update(dt) {
   if(player.x>maxPX){player.x=maxPX;player.vx=Math.min(0,player.vx);}
   const targetAngle = clamp(player.vy / (CONFIG.maxFall * H) * 0.7, -0.5, 0.7);
   player.angle += (targetAngle - player.angle) * Math.min(1, dt * 10);
+
+  // --- Ghost Replay Races: record the flight on the unpaused run clock ---
+  // runT is built from the same dt every other system uses, so pausing
+  // freezes the pilot AND the ghost, and replays line up frame-for-frame.
+  runT += dt;
+  if (ghostRun && !ghostRun.beat && score > ghostRun.score) {   // pulled ahead of the ghost mid-flight!
+    ghostRun.beat = true;
+    addText(player.x, player.y - H * 0.08, "NEW BEST FLIGHT PACE!", "#ffd34d", 1.15);
+  }
+  if (runT - lastRecT >= GHOST_SAMPLE_DT && ghostRec.length < GHOST_SAMPLE_MAX) {
+    lastRecT = runT;   // scheduled off the run clock, so pauses never bunch samples up
+    ghostRec.push([Math.round(runT * 1000), Math.round(player.x / W * 1000),
+                   Math.round(player.y / H * 1000), Math.round(player.angle * 100)]);
+  }
 
   // emit cloud-puff trail
   trailAcc += dt;
@@ -907,6 +1133,21 @@ function update(dt) {
     }
   }
 
+  // Dino Bob plush: drifts right→left with a lazy sine float; bump him for +25
+  if (plush) {
+    plush.x -= worldDx * 0.5 + H * 0.055 * dt * ws;   // slower than the world → feels like a lazy floater
+    plush.y = plush.baseY + Math.sin(tnow * 1.4 + plush.p) * H * 0.02;
+    if (plush.x < -W * 0.15) plush = null;
+    else if (Math.hypot(player.x - plush.x, player.y - plush.y) < phh + H * 0.045) {
+      score += 25;
+      addText(plush.x, plush.y, "+25 DINO!", "#7cffa8", 1.35);
+      burst("feather", plush.x, plush.y, 12, { color: "#7cffa8", spMax: 0.55, grav: 0.5, lifeMax: 0.9 });
+      burst("spark", plush.x, plush.y, 16, { color: "#ffd34d", spMax: 0.7, grav: 0.2, lifeMax: 0.7 });
+      SFX.power(); haptic(30);
+      plush = null;
+    }
+  }
+
   // gust clouds: bob, score, collide
   for (const g of gusts) {
     g.y = g.baseY + Math.sin(tnow * 1.6 + g.p) * H * 0.03;
@@ -999,7 +1240,7 @@ function startBoss(lvl) {
   lvl = lvl || 1;
   bossActive = true; bossPhase = 1; bossT = 0; bossShootCd = 0; bossPartsThrown = 0;
   shots = []; friendlyShots = []; bossAmmo = 0; bossSupplyCd = 2.4;
-  rings = []; fish = []; powerups = []; birds = []; gusts = []; missionItems = []; // clear the arena
+  rings = []; fish = []; powerups = []; birds = []; gusts = []; missionItems = []; plush = null; // clear the arena
   const segment = lvl === 2, finalBoss = lvl >= 3, big = lvl >= 2;
   const spr=segment?ASSETS.gunDeck:big?ASSETS.boss2:ASSETS.boss;
   const cropFrac = 1;
@@ -1021,6 +1262,7 @@ function startBoss(lvl) {
            muzRx: finalBoss ? .05 : segment ? .08 : .055, muzRy: finalBoss ? .07 : segment ? .13 : .11 };
   banner = finalBoss ? "THE FULL DREADNOUGHT ARRIVES!" : segment ? "THE GUN DECK BLOCKS THE WAY!" : "WARNING — THE GUN DROPS DOWN!"; bannerT = 3.6;
   shakeT = 0.9; SFX.alarm();
+  VOICE.play("boss_here");   // Lachlan warns the tower: the boss is here!
 }
 function bossMuzzle() {   // the firing bore, measured from whichever sprite this boss uses
   return { x: boss.x + boss.w * boss.muzX, y: boss.y + boss.h * boss.muzY };
@@ -1036,6 +1278,9 @@ function bossWin() {
   worldsCleared = Math.max(worldsCleared, lvl);
   localStorage.setItem("ipcf_worlds", String(worldsCleared));
   if (score > best) { best = score; localStorage.setItem("ipcf_best", String(best)); }
+  storeGhostIfBest();   // victory laps count too — save the winning path
+  VOICE.play("boss_down");                                  // "boss down!" right on the kill
+  setTimeout(() => VOICE.play("world_clear"), 1400);        // then the world-clear cheer a beat later
 }
 function throwPart() {   // a chunk of the cruiser breaks off and flies at the penguin
   bossPartsThrown++;
@@ -1256,6 +1501,20 @@ function drawTiledBg(img) {            // horizontally-tiling parallax backgroun
   let x = bgX % tileW; if (x > 0) x -= tileW;
   for (let dx = x; dx < W; dx += tileW) ctx.drawImage(img, dx, 0, tileW, H);
 }
+function drawBgBand(img, band, speedMul, s) {   // one tiled multiplane layer
+  const y = band.top * H, h = (band.bot - band.top) * H, tileW = img.width * s;
+  let x = (bgX * speedMul) % tileW; if (x > 0) x -= tileW;
+  for (let dx = x; dx < W; dx += tileW) ctx.drawImage(img, dx, y, tileW, h);
+}
+function drawMultiplaneBg0() {   // world 0 in three parallax planes cut from one painting
+  const g = ctx.createLinearGradient(0, 0, 0, H);   // open-sky base so feathered band
+  g.addColorStop(0, "#4fb6f5"); g.addColorStop(1, "#9fd8fb");   // edges read as haze
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const s = (BG0_BANDS.far.bot * H) / ASSETS.bg0.far.height;
+  drawBgBand(ASSETS.bg0.far, BG0_BANDS.far, 1, s);
+  drawBgBand(ASSETS.bg0.mid, BG0_BANDS.mid, CONFIG.bgMid, s);
+  drawBgBand(ASSETS.bg0.near, BG0_BANDS.near, CONFIG.bgNear, s);
+}
 function drawCoverImage(img) {          // object-fit: cover, full screen
   const s = Math.max(W / img.width, H / img.height);
   const w = img.width * s, h = img.height * s;
@@ -1271,7 +1530,9 @@ function drawImageCoverRect(img, rx, ry, rw, rh, r) {   // object-fit: cover int
 function drawBackground() {
   const world = activeWorld();
   const painted = world === 0 ? ASSETS.bg : (ASSETS.worldBg[world] || null);
-  if (painted && painted.ok) {
+  if (world === 0 && ASSETS.bg0.far.ok && ASSETS.bg0.mid.ok && ASSETS.bg0.near.ok) {
+    drawMultiplaneBg0();
+  } else if (painted && painted.ok) {
     drawTiledBg(painted);
   } else if (world === 0) {
     const g = ctx.createLinearGradient(0, 0, 0, H);
@@ -1302,6 +1563,43 @@ function drawSnow() {
   ctx.save(); ctx.fillStyle = `rgba(255,255,255,${0.85 * snowAmt})`;
   for (const f of flakes) { ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, 6.2832); ctx.fill(); }
   ctx.restore();
+}
+
+function drawDepthHaze() {   // aerial perspective: pale fog pooled where the far
+  const a = CONFIG.haze * Math.max(0, 1 - darkCur * 2);   // scenery recedes; night worlds dim it out
+  if (a < 0.01) return;
+  const top = H * 0.42;
+  const g = ctx.createLinearGradient(0, top, 0, H * 0.88);
+  g.addColorStop(0, "rgba(232,246,255,0)");
+  g.addColorStop(0.72, `rgba(232,246,255,${a})`);
+  g.addColorStop(1, "rgba(232,246,255,0)");
+  ctx.fillStyle = g; ctx.fillRect(0, top, W, H * 0.46);
+}
+function drawSoftShadow(x, y, rx, ry, alpha) {   // soft ellipse "contact" shadow —
+  if (alpha < 0.01) return;                      // grounds objects floating in front of the sky
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+  g.addColorStop(0, `rgba(16,42,86,${alpha})`);   // midnight-navy ink from the palette, not black
+  g.addColorStop(1, "rgba(16,42,86,0)");
+  ctx.save(); ctx.translate(x, y); ctx.scale(1, ry / rx);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, rx, 0, 6.2832); ctx.fill();
+  ctx.restore();
+}
+function drawObjectShadows() {   // one pass before any entities, so shadows never sit on sprites
+  const a = CONFIG.shadow;
+  if (a < 0.01) return;
+  for (const r of rings) {
+    if (r.smashed) continue;
+    const ringH = H * CONFIG.ringHeight, ringW = ringH * RING.aspect;
+    drawSoftShadow(r.x + ringW * 0.16, r.cy + ringH * 0.44, ringW * 0.44, ringH * 0.12, a * 0.75);
+  }
+  for (const f of fish) drawSoftShadow(f.x, f.y + H * 0.048, H * 0.030, H * 0.009, a);
+  for (const pu of powerups) drawSoftShadow(pu.x, pu.y + H * 0.05, H * 0.026, H * 0.008, a);
+  if (plush) drawSoftShadow(plush.x, plush.y + H * 0.052, H * 0.03, H * 0.009, a);
+  for (const it of missionItems) drawSoftShadow(it.x, it.y + H * 0.05, H * 0.026, H * 0.008, a);
+  for (const b of birds) drawSoftShadow(b.x, b.y + H * 0.05, H * 0.032, H * 0.009, a);
+  if (bossActive && boss) drawSoftShadow(boss.x + boss.w * 0.10, boss.y + boss.h * 0.55, boss.w * 0.42, boss.h * 0.16, a * 0.85);
+  // drop must clear the sprite's own half-height (~0.11H) or the plane hides its shadow
+  drawSoftShadow(player.x + H * 0.02, player.y + H * 0.135, H * 0.06, H * 0.014, a);
 }
 
 function drawRing(r, half) {
@@ -1387,6 +1685,38 @@ function drawPowerups() {
       ctx.fillStyle = "#ffd34d"; ctx.beginPath(); ctx.arc(pu.x, y, sz * 0.36, 0, 7); ctx.fill();
     }
   }
+}
+/* Dino Bob plush crossover collectible — warm sparkle aura (same lighter-
+   composite trick as the power-ups), lazy float, gentle ±0.15rad rocking.
+   Reduced motion: skip the pulsing aura and rock, draw the sprite still. */
+function drawPlush() {
+  if (!plush) return;
+  const t = performance.now() / 1000, sz = H * 0.075;
+  if (!reducedMotion) {
+    ctx.save(); ctx.globalCompositeOperation = "lighter";
+    const r = sz * (0.85 + 0.08 * Math.sin(t * 5 + plush.p));
+    const g = ctx.createRadialGradient(plush.x, plush.y, 0, plush.x, plush.y, r);
+    g.addColorStop(0, "rgba(255,255,200,0.55)"); g.addColorStop(1, "rgba(255,255,200,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(plush.x, plush.y, r, 0, 6.2832); ctx.fill();
+    ctx.restore();
+  }
+  ctx.save();
+  ctx.translate(plush.x, plush.y);
+  if (!reducedMotion) ctx.rotate(Math.sin(t * 1.8 + plush.p) * 0.15);
+  const img = ASSETS.dinoPlush;
+  if (img && img.ok) {
+    const h = sz * (img.height / img.width);
+    ctx.drawImage(img, -sz / 2, -h / 2, sz, h);
+  } else {   // procedural fallback: green blob with eyes, matching the placeholder style
+    ctx.fillStyle = "#5cb85c"; ctx.beginPath(); ctx.arc(0, 0, sz * 0.38, 0, 6.2832); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(-sz * 0.12, -sz * 0.08, sz * 0.09, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(sz * 0.12, -sz * 0.08, sz * 0.09, 0, 7); ctx.fill();
+    ctx.fillStyle = "#102a56";
+    ctx.beginPath(); ctx.arc(-sz * 0.10, -sz * 0.08, sz * 0.042, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(sz * 0.14, -sz * 0.08, sz * 0.042, 0, 7); ctx.fill();
+  }
+  ctx.restore();
 }
 function drawMissionItems() {
   const t=performance.now()/1000;
@@ -1501,15 +1831,24 @@ function drawPlayer() {
 }
 // Which flight pose to show on the animated Classic strip (all art is nose-left).
 function heroFrame() {
-  if (steeringLeft) return 2;                          // bank up/left
-  if (steeringRight) return 3;                         // bank down/right
-  if (holding) return 1;                               // flipper-up climb
+  if (steerAxis < -0.35) return 2;                     // bank up/left (touch or analog)
+  if (steerAxis > 0.35) return 3;                      // bank down/right
+  if (climbAmt > 0) return 1;                          // flipper-up climb
   if (player.vy > CONFIG.maxFall * H * 0.5) return 3;  // steep dive
   return 0;                                            // neutral cruise
 }
 // Draws the equipped hero: a painted skin (kits 1-3) or the animated Classic
 // strip (kit 0). Returns false if no art is ready so the caller can fall back.
 function drawHero(drawW, drawH) {
+  if (CONFIG.hero3D) {                 // v7: Blender-baked toy, same nose-left strip layout
+    const toy = ASSETS.heroStrip3D;
+    if (toy && toy.ok) {
+      const cw = toy.width / 4;          // strip is 4 square cells
+      ctx.save(); ctx.scale(-1, 1);
+      ctx.drawImage(toy, heroFrame() * cw, 0, cw, toy.height, -drawW / 2, -drawH / 2, drawW, drawH);
+      ctx.restore(); return true;
+    }
+  }
   const skin = ASSETS.skins[0];
   if (skin && skin.ok) {
     ctx.save(); ctx.scale(-1, 1);   // art's nose points left; flip to fly forward
@@ -1777,6 +2116,12 @@ function drawPauseOverlay() {
   ctx.closePath(); ctx.fill();
   ctx.font = `800 ${Math.round(Math.min(H * 0.034, 28))}px -apple-system,system-ui,sans-serif`;
   ctx.fillStyle = "#f6fbff"; ctx.fillText("Tap to keep flying", W / 2, cy + r + H * 0.055);
+  // [PHOTO] entry — same rounded-panel style as the What's New chip
+  const pb = photoBtnRect();
+  roundedPanel(pb.x, pb.y, pb.w, pb.h, pb.h / 2, "rgba(16,42,86,.85)", "rgba(255,211,77,.75)");
+  ctx.fillStyle = "#ffd34d";
+  ctx.font = `900 ${Math.round(pb.h * 0.34)}px -apple-system,system-ui,sans-serif`;
+  ctx.fillText("PHOTO", pb.x + pb.w / 2, pb.y + pb.h / 2 + 1);
   ctx.restore();
 }
 function drawBanner() {
@@ -1973,6 +2318,72 @@ function drawWorldCards() {
     ctx.restore();
   }
 }
+/* ---- "What's New" Ship Day ritual: a v13 chip on the title opens a small
+   scrollable panel listing every shipped version, newest first. ---- */
+function openWhatsNew() { whatsNewOpen = true; whatsNewScroll = 0; audioInit(); }
+function closeWhatsNew() { whatsNewOpen = false; }
+function whatsNewChipRect() {
+  const w = Math.max(56, H * 0.09), h = Math.max(28, H * 0.048);
+  return { x: 14, y: H - h - 14, w, h };
+}
+function whatsNewChipHit(px, py) {
+  const c = whatsNewChipRect(), pad = sHitPad();
+  return px >= c.x - pad && px <= c.x + c.w + pad && py >= c.y - pad && py <= c.y + c.h + pad;
+}
+function whatsNewBackRect() {
+  const bw = Math.min(W * 0.34, H * 0.5), bh = Math.max(46, H * 0.062);
+  return { x: (W - bw) / 2, y: H * 0.865, w: bw, h: bh };
+}
+function whatsNewBackHit(px, py) {
+  const b = whatsNewBackRect();
+  return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h;
+}
+function drawWhatsNewChip() {   // tiny corner chip — same rounded-panel style as the pause button
+  const c = whatsNewChipRect();
+  ctx.save();
+  roundedPanel(c.x, c.y, c.w, c.h, c.h / 2, "rgba(16,42,86,.85)", "rgba(255,211,77,.75)");
+  ctx.fillStyle = "#ffd34d"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = `900 ${Math.round(c.h * 0.52)}px -apple-system, system-ui, sans-serif`;
+  ctx.fillText("v" + CHANGELOG[0].v, c.x + c.w / 2, c.y + c.h / 2 + 1);
+  ctx.restore();
+}
+function drawWhatsNewPanel() {   // storybook-paper panel; wheel or drag to scroll
+  ctx.save();
+  ctx.fillStyle = "rgba(8,16,34,.72)"; ctx.fillRect(0, 0, W, H);
+  const u = Math.min(H, W * 0.8);
+  const pw = Math.min(W * 0.88, H * 1.05), ph = H * 0.66, x = (W - pw) / 2, y = H * 0.115;
+  roundedPanel(x, y, pw, ph, u * 0.03, "#f6f0d8", "#102a56");
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ff7a45"; ctx.font = `900 ${Math.round(u * 0.032)}px -apple-system, system-ui, sans-serif`;
+  ctx.fillText("WHAT'S NEW?", W / 2, y + ph * 0.075);
+  const cx = x + pw * 0.06, top = y + ph * 0.135, bot = y + ph * 0.90;
+  ctx.save(); roundRect(x + pw * 0.03, top - u * 0.01, pw * 0.94, bot - top + u * 0.02, u * 0.015); ctx.clip();
+  let cy = top + u * 0.02 - whatsNewScroll;
+  for (const entry of CHANGELOG) {   // CHANGELOG is already newest-first
+    ctx.textAlign = "left"; ctx.fillStyle = "#102a56";
+    ctx.font = `900 ${Math.round(u * 0.028)}px -apple-system, system-ui, sans-serif`;
+    ctx.fillText("v" + entry.v + "  \u2022  " + entry.date, cx, cy); cy += u * 0.038;
+    ctx.font = `600 ${Math.round(u * 0.023)}px -apple-system, system-ui, sans-serif`;
+    ctx.fillStyle = "#28466d";
+    for (const n of entry.notes) { ctx.fillText("\u2605 " + n, cx + u * 0.014, cy); cy += u * 0.034; }
+    cy += u * 0.026;
+  }
+  whatsNewScrollMax = Math.max(0, (cy + whatsNewScroll) - bot + u * 0.02);   // measured for the clamp
+  ctx.restore();
+  if (whatsNewScrollMax > 0) {   // little scrollbar thumb so scrolling is discoverable
+    const frac = (bot - top) / (bot - top + whatsNewScrollMax);
+    const thumbH = Math.max(20, (bot - top) * frac);
+    const ty = top + (whatsNewScrollMax ? whatsNewScroll / whatsNewScrollMax : 0) * ((bot - top) - thumbH);
+    ctx.fillStyle = "rgba(16,42,56,.35)"; roundRect(x + pw * 0.955, ty, pw * 0.018, thumbH, pw * 0.009); ctx.fill();
+  }
+  ctx.fillStyle = "#5b6b82"; ctx.font = `700 ${Math.round(u * 0.017)}px -apple-system, system-ui, sans-serif`;
+  ctx.fillText("scroll for older ships", W / 2, y + ph * 0.945);
+  const b = whatsNewBackRect();
+  roundedPanel(b.x, b.y, b.w, b.h, b.h / 2, "#ff7a45", "#f6fbff");
+  ctx.fillStyle = "#fff"; ctx.font = `900 ${Math.round(b.h * 0.48)}px -apple-system, system-ui, sans-serif`;
+  ctx.fillText("BACK", W / 2, b.y + b.h * 0.54);
+  ctx.restore();
+}
 function drawTutorial() {
   if (state !== STATE.PLAYING || tutorialStep >= 3 && tutorialT <= 0) return;
   const messages = ["HOLD TO CLIMB  •  RELEASE TO DIVE", "AIM THROUGH THE GOLDEN CENTER", "COLLECT FISH  •  GRAB THE BLUE SHIELD", "BEAT BOSSES TO CLEAR WORLDS!"];
@@ -2042,14 +2453,341 @@ function drawPortraitPrompt() {
   ctx.restore();
 }
 
+/* ------------------------- Ghost Replay Races --------------------------
+   update() does the recording; these helpers store, load, race and draw it.
+   One ghost per world, kept in localStorage as:
+     ipcf_ghost_w<n> = { score, date, samples:[[tMs, x‰W, y‰H, pitch·100], ...] }
+----------------------------------------------------------------------- */
+function ghostKey(w) { return "ipcf_ghost_w" + w; }
+function loadGhost(w) {   // missing or corrupt JSON just reads as "no ghost here"
+  try {
+    const d = JSON.parse(localStorage.getItem(ghostKey(w)) || "null");
+    if (d && typeof d.score === "number" && Array.isArray(d.samples) && d.samples.length > 1) return d;
+  } catch (e) {}
+  return null;
+}
+function cachedGhost(w) {   // read storage once per world, then trust the cache
+  if (!(w in ghostStored)) ghostStored[w] = loadGhost(w);
+  return ghostStored[w];
+}
+function storeGhostIfBest() {   // called from gameOver() AND bossWin()
+  if (ghostRec.length < 2) return;                // too short to be worth replaying
+  const prev = loadGhost(currentWorld);
+  if (prev && prev.score >= score) return;        // the old ghost keeps the crown
+  const data = { score, date: new Date().toISOString().slice(0, 10), samples: ghostRec };
+  try { localStorage.setItem(ghostKey(currentWorld), JSON.stringify(data)); ghostStored[currentWorld] = data; }
+  catch (e) {}                                    // storage full → skip the save, keep the fun
+}
+function raceGhostStart() {   // RACE MY GHOST: relaunch this world with the ghost riding along
+  audioInit();
+  racePending = true;                            // reset() (just below) picks it up
+  const w = currentWorld;
+  reset(); applyWorldConfig(w);
+  state = STATE.PLAYING; holding = true;
+  SFX.flap();
+}
+/* ---- game-over screen row: BEST FLIGHT label + [RACE MY GHOST] [CLEAR] ---- */
+function ghostRowRects() {
+  const h = Math.max(44, H * 0.062);
+  const rw = Math.min(W * 0.36, H * 0.56), cw = Math.min(W * 0.22, H * 0.38), gap = W * 0.028;
+  const x0 = (W - (rw + gap + cw)) / 2, y = H * 0.775;
+  return { race: { x: x0, y, w: rw, h }, clear: { x: x0 + rw + gap, y, w: cw, h }, labelY: H * 0.745 };
+}
+function ghostButtonsHit(px, py) {   // returns true when the tap belonged to the ghost row
+  if (diedAtBoss || !cachedGhost(currentWorld)) return false;
+  const r = ghostRowRects(), pad = sHitPad();
+  const inB = (b) => px >= b.x - pad && px <= b.x + b.w + pad && py >= b.y - pad && py <= b.y + b.h + pad;
+  if (inB(r.clear)) {   // double-tap confirm: first tap arms, second tap (within 2.5s) deletes
+    if (performance.now() - ghostClearArmedAt < 2500) {
+      try { localStorage.removeItem(ghostKey(currentWorld)); } catch (e) {}
+      ghostStored[currentWorld] = null; ghostClearArmedAt = 0;
+      texts.push({ x: W / 2, y: H * 0.30, str: "Ghost cleared!", color: "#9fb6d8", scale: 1, life: 1.6, max: 1.6 });
+    } else {
+      ghostClearArmedAt = performance.now();
+      texts.push({ x: W / 2, y: H * 0.30, str: "Tap CLEAR again to delete", color: "#ff8a6b", scale: 1, life: 1.8, max: 1.8 });
+    }
+    return true;
+  }
+  if (inB(r.race)) { raceGhostStart(); return true; }
+  return false;
+}
+function drawGhostRow() {   // regular game-over only; the boss-retry screen has its own big button
+  if (state !== STATE.OVER || diedAtBoss) return;
+  const g = cachedGhost(currentWorld);
+  if (!g) return;
+  const r = ghostRowRects(), armed = performance.now() - ghostClearArmedAt < 2500;
+  ctx.save(); ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = Math.max(2, H * 0.006); ctx.strokeStyle = "rgba(0,0,0,0.55)";
+  ctx.fillStyle = "#7fd0ff"; ctx.font = `800 ${Math.round(H * 0.03)}px -apple-system, system-ui, sans-serif`;
+  const lbl = "BEST FLIGHT: " + g.score;
+  ctx.strokeText(lbl, W / 2, r.labelY); ctx.fillText(lbl, W / 2, r.labelY);
+  roundedPanel(r.race.x, r.race.y, r.race.w, r.race.h, r.race.h / 2, "#ff7a45", "#f6fbff");
+  ctx.fillStyle = "#fff"; ctx.font = `900 ${Math.round(r.race.h * 0.42)}px -apple-system, system-ui, sans-serif`;
+  ctx.fillText("RACE MY GHOST", r.race.x + r.race.w / 2, r.race.y + r.race.h * 0.54);
+  roundedPanel(r.clear.x, r.clear.y, r.clear.w, r.clear.h, r.clear.h / 2,
+               armed ? "rgba(255,90,70,.92)" : "rgba(16,42,86,.85)", "rgba(246,251,255,.6)");
+  ctx.fillStyle = "#f6fbff"; ctx.font = `900 ${Math.round(r.clear.h * 0.42)}px -apple-system, system-ui, sans-serif`;
+  ctx.fillText(armed ? "SURE?" : "CLEAR", r.clear.x + r.clear.w / 2, r.clear.y + r.clear.h * 0.54);
+  ctx.restore();
+}
+/* ---- drawing the ghost during a race ---- */
+function ghostPose() {   // interpolate the samples at the shared run clock (advancing pointer)
+  const g = ghostRun, s = g.samples;
+  if (!s.length) return null;
+  const tMs = runT * 1000;   // samples store milliseconds; runT counts seconds
+  let i = Math.min(g.ptr, s.length - 1);
+  while (i < s.length - 1 && s[i + 1][0] <= tMs) i++;   // runT only ever grows → walk forward
+  g.ptr = i;
+  const a = s[i], b = s[Math.min(i + 1, s.length - 1)];
+  const span = b[0] - a[0], t = span > 0 ? clamp((tMs - a[0]) / span, 0, 1) : 0;
+  return { x: lerp(a[1], b[1], t) * W / 1000, y: lerp(a[2], b[2], t) * H / 1000, a: lerp(a[3], b[3], t) / 100 };
+}
+function ghostFrameFromPitch(a) {   // pick a strip pose from the recorded pitch
+  if (a < -0.22) return 1;          // nose up = the flipper-up climb pose
+  if (a > 0.38) return 3;           // nose down = the dive pose
+  return 0;                         // neutral cruise
+}
+function ghostTintedStrip() {   // the hero strip painted navy ONCE via 'source-atop', then reused
+  const img = (CONFIG.hero3D && ASSETS.heroStrip3D.ok) ? ASSETS.heroStrip3D :
+              (ASSETS.heroStrip.ok ? ASSETS.heroStrip : null);
+  if (!img) return null;
+  if (!ghostStripCache || ghostStripCache.src !== img) {
+    const cv = document.createElement("canvas");
+    cv.width = img.width; cv.height = img.height;
+    const c = cv.getContext("2d");
+    c.drawImage(img, 0, 0);
+    c.globalCompositeOperation = "source-atop";   // paint only the penguin's own pixels
+    c.fillStyle = "rgba(22,48,94,0.78)";
+    c.fillRect(0, 0, cv.width, cv.height);
+    ghostStripCache = { src: img, cv };
+  }
+  return ghostStripCache.cv;
+}
+function drawGhost() {   // purely visual: no collisions, no pickups, no shadow pass
+  if (state !== STATE.PLAYING || !ghostRun) return;
+  const p = ghostPose();
+  if (!p) return;
+  const drawW = H * CONFIG.playerW, drawH = drawW;
+  const cv = ghostTintedStrip();
+  ctx.save();
+  ctx.translate(p.x, p.y); ctx.rotate(p.a);
+  ctx.globalAlpha = 0.32;
+  if (cv) {
+    const cw = cv.width / 4;   // same 4-cell square layout drawHero() flies with
+    ctx.scale(-1, 1);          // art faces left; flip so the ghost flies forward too
+    ctx.drawImage(cv, ghostFrameFromPitch(p.a) * cw, 0, cw, cv.height, -drawW / 2, -drawH / 2, drawW, drawH);
+  } else {
+    ctx.fillStyle = "#16305e";   // strip art still loading: a soft navy stand-in blob
+    ctx.beginPath(); ctx.arc(0, 0, drawW * 0.30, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+  ctx.save();   // tiny name tag so it reads as a rival, not a rendering bug
+  ctx.globalAlpha = 0.55; ctx.fillStyle = "#9fb6d8";
+  ctx.font = `800 ${Math.round(H * 0.018)}px -apple-system, system-ui, sans-serif`;
+  ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+  ctx.fillText("GHOST", p.x, p.y - drawH * 0.58);
+  ctx.restore();
+}
+
+/* ---------------------- Photo Mode + Share Card ------------------------
+   The camera: enter from the pause overlay, drag to pan (±80 px), cycle
+   the zoom, then SHUTTER composes a share card from the live canvas.
+   exitPhotoMode() is the single way out — keyboard Esc/P, gamepad Start,
+   blur/visibility and the on-screen EXIT all land here, so nothing leaks
+   frames or handlers no matter how often you hop in and out. */
+function enterPhotoMode() {
+  if (!paused || photoMode) return;      // only meaningful from the pause overlay
+  photoMode = true;
+  photoPan.x = 0; photoPan.y = 0;
+  photoZoomIdx = 0; photoDragId = null; photoDragLast = null; photoFlashT = 0;
+  last = performance.now();              // fresh dt so nothing time-jumps on resume
+  requestFrame();                        // wake the loop back up while staying paused
+}
+function exitPhotoMode() {
+  if (!photoMode) return;
+  photoMode = false;
+  photoZoomIdx = 0; photoPan.x = 0; photoPan.y = 0;   // restore the exact pre-photo view
+  photoDragId = null; photoDragLast = null; photoFlashT = 0;
+  cancelFrame();                         // hand rendering back to the static pause overlay
+  drawPauseOverlay();
+}
+function cyclePhotoZoom(dir) {
+  photoZoomIdx = (photoZoomIdx + dir + PHOTO_ZOOMS.length) % PHOTO_ZOOMS.length;
+  haptic(12);
+}
+function photoWorldName() { return (WORLD_INFO[level] || WORLD_INFO[1]).name; }
+
+/* --- photo bar layout + hit tests (bottom strip, HUD drawing conventions) --- */
+function photoShutterPos() { return { x: W / 2, y: H - Math.max(52, H * 0.095), r: Math.max(30, H * 0.055) }; }
+function photoZoomPos(side) {
+  const s = photoShutterPos(), r = Math.max(22, H * 0.042);
+  return { x: s.x + side * (s.r + r * 2.1), y: s.y, r };
+}
+function photoExitPos() { const r = Math.max(24, H * 0.046); return { x: W - r - Math.max(18, H * 0.05), y: H - Math.max(52, H * 0.095), r }; }
+function photoCircleHit(px, py, p) { return px != null && Math.hypot(px - p.x, py - p.y) <= p.r * 1.35; }
+function photoPress(px, py) {
+  if (photoCircleHit(px, py, photoExitPos())) { exitPhotoMode(); return; }
+  if (photoCircleHit(px, py, photoShutterPos())) { takePhoto(); return; }
+  if (photoCircleHit(px, py, photoZoomPos(-1))) { cyclePhotoZoom(-1); return; }
+  if (photoCircleHit(px, py, photoZoomPos(1))) { cyclePhotoZoom(1); return; }
+}
+/* Pan = drag anywhere. Listeners attach once at load and self-noop unless
+   photo mode is live, so entering/exiting never leaks handlers. */
+canvas.addEventListener("pointerdown", (e) => {
+  if (!photoMode || photoDragId != null) return;
+  photoDragId = e.pointerId;
+  photoDragLast = { x: e.clientX, y: e.clientY };
+});
+window.addEventListener("pointermove", (e) => {
+  if (!photoMode || e.pointerId !== photoDragId || !photoDragLast) return;
+  photoPan.x = clamp(photoPan.x + (e.clientX - photoDragLast.x), -80, 80);
+  photoPan.y = clamp(photoPan.y + (e.clientY - photoDragLast.y), -80, 80);
+  photoDragLast = { x: e.clientX, y: e.clientY };
+});
+window.addEventListener("pointerup", (e) => { if (e.pointerId === photoDragId) { photoDragId = null; photoDragLast = null; } });
+window.addEventListener("pointercancel", (e) => { if (e.pointerId === photoDragId) { photoDragId = null; photoDragLast = null; } });
+
+function drawPhotoCircle(p, fill, strong) {
+  ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 1.16, 0, Math.PI * 2); ctx.fillStyle = "rgba(246,251,255,.22)"; ctx.fill();
+  ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = fill || "#102a56"; ctx.fill();
+  ctx.strokeStyle = strong ? "#f6fbff" : "rgba(246,251,255,.6)";
+  ctx.lineWidth = strong ? Math.max(3, p.r * 0.09) : Math.max(2, p.r * 0.08);
+  ctx.stroke();
+}
+function drawPhotoBar() {
+  const bh = Math.max(92, H * 0.17);
+  ctx.save();
+  ctx.fillStyle = "rgba(16,42,86,.84)"; ctx.fillRect(0, H - bh, W, bh);
+  ctx.fillStyle = "rgba(255,211,77,.55)"; ctx.fillRect(0, H - bh, W, Math.max(2, H * 0.005));
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const s = photoShutterPos(), zm = photoZoomPos(-1), zp = photoZoomPos(1), ex = photoExitPos();
+  // shutter: big aurora-gold button with a white lens ring
+  drawPhotoCircle(s, "#ffd34d", true);
+  ctx.strokeStyle = "#ffd34d"; ctx.lineWidth = Math.max(3, s.r * 0.11);
+  ctx.beginPath(); ctx.arc(s.x, s.y, s.r * 0.55, 0, Math.PI * 2); ctx.stroke();
+  // zoom pair + exit
+  drawPhotoCircle(zm); drawPhotoCircle(zp); drawPhotoCircle(ex);
+  ctx.fillStyle = "#f6fbff";
+  ctx.font = `900 ${Math.round(zm.r * 1.15)}px -apple-system,system-ui,sans-serif`;
+  ctx.fillText("\u2212", zm.x, zm.y + zm.r * 0.08);
+  ctx.fillText("+", zp.x, zp.y + zp.r * 0.06);
+  ctx.font = `800 ${Math.round(ex.r * 0.62)}px -apple-system,system-ui,sans-serif`;
+  ctx.fillText("EXIT", ex.x, ex.y + 1);
+  // tiny labels under each control
+  ctx.fillStyle = "rgba(246,251,255,.75)";
+  ctx.font = `700 ${Math.round(Math.max(10, H * 0.02))}px -apple-system,system-ui,sans-serif`;
+  ctx.fillText("ZOOM \u2212", zm.x, zm.y + zm.r + H * 0.032);
+  ctx.fillText("SHUTTER", s.x, s.y + s.r + H * 0.032);
+  ctx.fillText("ZOOM +", zp.x, zp.y + zp.r + H * 0.032);
+  ctx.fillText("EXIT", ex.x, ex.y + ex.r + H * 0.032);
+  // current zoom readout, left end of the bar (mirrors EXIT on the right)
+  ctx.fillStyle = "#ffd34d";
+  ctx.font = `900 ${Math.round(Math.max(13, H * 0.028))}px -apple-system,system-ui,sans-serif`;
+  ctx.fillText(PHOTO_ZOOMS[photoZoomIdx].toFixed(2) + "\u00d7", Math.max(64, H * 0.15), s.y);
+  // toast feedback ("Saved!" / "Shared!") — lives here because the world's
+  // floating texts are frozen while the camera is open
+  if (photoToast && performance.now() < photoToast.until) {
+    ctx.fillStyle = "#ffd34d";
+    ctx.strokeStyle = "rgba(0,0,0,.5)"; ctx.lineWidth = Math.max(3, H * 0.008);
+    ctx.font = `900 ${Math.round(H * 0.045)}px -apple-system,system-ui,sans-serif`;
+    ctx.strokeText(photoToast.str, W / 2, H - bh - H * 0.06);
+    ctx.fillText(photoToast.str, W / 2, H - bh - H * 0.06);
+  } else photoToast = null;
+  ctx.restore();
+}
+
+/* --- SHUTTER: compose the share card offscreen --------------------------
+   Snapshot source rect is in BACKING pixels (canvas.width/height already
+   include the DPR cap), then pasted into a rounded midnight-navy frame
+   with aurora-gold accents per ART_DIRECTION.md. */
+function rrOn(c, x, y, w, h, r) {   // roundRect() twin for offscreen contexts
+  c.beginPath(); c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+}
+function buildShareCard(src) {
+  const sw = src.width, sh = src.height;                 // backing-store pixels (DPR included)
+  const cardW = 1080, pad = Math.round(cardW * 0.055);
+  const shotW = Math.round(cardW * 0.89);
+  const shotH = Math.round(shotW / (sw / sh));
+  const capH = Math.round(cardW * 0.235);
+  const cardH = pad + shotH + capH + Math.round(pad * 0.4);
+  const card = document.createElement("canvas");
+  card.width = cardW; card.height = cardH;
+  const c = card.getContext("2d");
+  c.fillStyle = "#102A56"; rrOn(c, 0, 0, cardW, cardH, 36); c.fill();   // midnight navy card
+  c.strokeStyle = "#FFD34D"; c.lineWidth = 6;                           // aurora gold trim
+  rrOn(c, 12, 12, cardW - 24, cardH - 24, 28); c.stroke();
+  const sx = Math.round((cardW - shotW) / 2), sy = pad;
+  c.save(); rrOn(c, sx, sy, shotW, shotH, 20); c.clip();
+  c.drawImage(src, 0, 0, sw, sh, sx, sy, shotW, shotH);
+  c.restore();
+  c.strokeStyle = "#FFD34D"; c.lineWidth = 4;
+  rrOn(c, sx, sy, shotW, shotH, 20); c.stroke();
+  // caption strip
+  c.textAlign = "center"; c.textBaseline = "middle";
+  let ty = sy + shotH + capH * 0.26;
+  c.fillStyle = "#FFD34D";
+  c.font = `900 ${Math.round(cardW * 0.048)}px -apple-system,system-ui,sans-serif`;
+  c.fillText("IF PENGUINS COULD FLY", cardW / 2, ty);
+  ty += capH * 0.27;
+  c.fillStyle = "#F6FBFF";
+  c.font = `800 ${Math.round(cardW * 0.034)}px -apple-system,system-ui,sans-serif`;
+  c.fillText("WORLD " + level + " \u2022 " + photoWorldName() + "  \u2014  SCORE " + score, cardW / 2, ty);
+  ty += capH * 0.24;
+  c.fillStyle = "rgba(246,251,255,.72)";
+  c.font = `600 ${Math.round(cardW * 0.024)}px -apple-system,system-ui,sans-serif`;
+  c.fillText(new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) + "  \u2022  flown by Lachlan", cardW / 2, ty);
+  return card;
+}
+function toastPhoto(str) { photoToast = { str, until: performance.now() + (reducedMotion ? 1400 : 1900) }; }
+function downloadPhoto(blob) {         // final fallback: plain download (blob-URL windows are blocked in PWA)
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "penguins-photo.png";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  toastPhoto("Saved!");
+}
+function shareCardBlob(blob) {         // Web Share → download. Never throws.
+  try {
+    const file = new File([blob], "penguins-photo.png", { type: "image/png" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({
+        files: [file],
+        title: "If Penguins Could Fly",
+        text: "Score " + score + " over " + photoWorldName() + "!",
+      }).then(() => toastPhoto("Shared!")).catch(() => {});   // user-cancelled share is not an error
+      return;
+    }
+    downloadPhoto(blob);
+  } catch (err) {
+    try { downloadPhoto(blob); } catch (err2) { toastPhoto("Photo failed"); }
+  }
+}
+function takePhoto() {
+  try {
+    const card = buildShareCard(canvas);   // reads the live frame synchronously, flash comes after
+    if (!reducedMotion) photoFlashT = 0.26;
+    haptic(20);
+    card.toBlob((blob) => {
+      if (!blob) { toastPhoto("Photo failed"); return; }
+      shareCardBlob(blob);
+    }, "image/png");
+  } catch (err) {
+    toastPhoto("Photo failed");
+  }
+}
+
 /* ------------------------------- Loop --------------------------------- */
 let last = performance.now();
 function frame(now) {
   rafId = 0;
-  if (paused) return;
+  if (paused && !photoMode) return;   // photo mode keeps drawing while paused
   let dt = (now - last) / 1000; last = now;
   if (dt > 0.05) dt = 0.05;
   if (isPortrait) {
+    photoDragId = null; photoDragLast = null;   // rotated away mid-shot: drop the pan finger
     drawPortraitPrompt();
     requestFrame();
     return;
@@ -2057,18 +2795,32 @@ function frame(now) {
   // keep audio alive: browsers (or another app grabbing sound) can re-suspend
   // the context mid-game — nudge it back awake every frame so sound recovers
   if (AC && AC.state !== "running" && !muted) AC.resume();
-  update(dt);
+  pollInputs(dt);   // gamepad + keyboard → merged signals (also watches Start/P while in photo mode)
+  if (!photoMode) update(dt);   // camera open = world frozen, exactly like the pause guard
+  else if (photoFlashT > 0) photoFlashT -= dt;
 
   ctx.save();
-  if (shakeT > 0 && !reducedMotion) { const m = shakeT * H * 0.06; ctx.translate(rand(-m, m), rand(-m, m)); }
+  if (photoMode) ctx.clearRect(0, 0, W, H);   // pan/zoom can reveal past the painted world
+  if (shakeT > 0 && !reducedMotion && !photoMode) { const m = shakeT * H * 0.06; ctx.translate(rand(-m, m), rand(-m, m)); }
+  if (photoMode) {
+    // zoom about screen center, then slide by the clamped pan — wraps every WORLD layer below
+    const z = PHOTO_ZOOMS[photoZoomIdx];
+    ctx.translate(W / 2 + photoPan.x, H / 2 + photoPan.y);
+    ctx.scale(z, z);
+    ctx.translate(-W / 2, -H / 2);
+  }
   drawBackground();
   drawStars();
+  drawDepthHaze();
+  drawObjectShadows();
   drawFish();
   drawPowerups();
+  drawPlush();
   drawMissionItems();
   drawGusts();
   for (const r of rings) drawRing(r, "left");
   if (bossActive) drawBoss();
+  drawGhost();   // translucent rival flies just beneath the real penguin
   drawPlayer();
   drawFriendlyShots();
   for (const r of rings) drawRing(r, "right");
@@ -2080,14 +2832,23 @@ function frame(now) {
   drawDust();
   ctx.restore();
 
-  if(nearMissT>0&&!reducedMotion){ctx.save();ctx.globalAlpha=nearMissT*.5;ctx.strokeStyle="#ff7a45";ctx.lineWidth=H*.035;ctx.strokeRect(0,0,W,H);ctx.restore();}
+  if(nearMissT>0&&!reducedMotion&&!photoMode){ctx.save();ctx.globalAlpha=nearMissT*.5;ctx.strokeStyle="#ff7a45";ctx.lineWidth=H*.035;ctx.strokeRect(0,0,W,H);ctx.restore();}
 
-  if (state === STATE.PLAYING) { drawScore(); drawBossMeter(); drawBossEntrance(); drawBanner(); drawBossHud(); drawFireButton(); drawTutorial(); drawDirectionControls(); if(mapT>0)drawJourneyMap(false); }
+  if (photoMode) {
+    if (photoFlashT > 0) {   // shutter blink (never armed under reduced motion)
+      ctx.fillStyle = `rgba(255,255,255,${Math.min(1, photoFlashT / 0.26)})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+    drawPhotoBar();
+  }
+  else if (state === STATE.PLAYING) { drawScore(); drawBossMeter(); drawBossEntrance(); drawBanner(); drawBossHud(); drawFireButton(); drawTutorial(); drawDirectionControls(); if(mapT>0)drawJourneyMap(false); }
   else if (state === STATE.STORY) {
     drawStoryPanel();
   }
   else if (state === STATE.READY) {
     drawTitleScreen();
+    drawWhatsNewChip();
+    if (whatsNewOpen) drawWhatsNewPanel();
   } else if (state === STATE.WIN) {
     drawScore();
     const foes = { 1: "Captain Albatross's gun", 2: "the Gun Deck", 3: "the mighty Dreadnought" };
@@ -2130,6 +2891,7 @@ function frame(now) {
       }
     }
     if(diedAtBoss)drawContinueBossButton();
+    drawGhostRow();   // "BEST FLIGHT" + RACE MY GHOST / CLEAR (only when a ghost is saved)
   }
   requestFrame();
 }
@@ -2137,8 +2899,24 @@ function frame(now) {
 resize();
 reset();
 requestFrame();
-window.addEventListener("blur", () => { if (state === STATE.PLAYING) setPaused(true); });
-document.addEventListener("visibilitychange", () => { if (document.hidden && state === STATE.PLAYING) setPaused(true); });
+window.addEventListener("blur", () => { if (state === STATE.PLAYING) { exitPhotoMode(); setPaused(true); } });
+document.addEventListener("visibilitychange", () => { if (document.hidden && state === STATE.PLAYING) { exitPhotoMode(); setPaused(true); } });
+
+/* What's New panel scrolling: mouse wheel + touch/pointer drag, both clamped
+   to the content height measured by the last draw. */
+canvas.addEventListener("wheel", (e) => {
+  if (!whatsNewOpen) return;
+  e.preventDefault();
+  whatsNewScroll = clamp(whatsNewScroll + e.deltaY, 0, whatsNewScrollMax);
+}, { passive: false });
+canvas.addEventListener("pointerdown", (e) => {
+  if (whatsNewOpen && state === STATE.READY) whatsNewDragY = e.clientY - whatsNewScroll;
+});
+window.addEventListener("pointermove", (e) => {
+  if (whatsNewDragY != null) whatsNewScroll = clamp(e.clientY - whatsNewDragY, 0, whatsNewScrollMax);
+});
+window.addEventListener("pointerup", () => { whatsNewDragY = null; });
+window.addEventListener("pointercancel", () => { whatsNewDragY = null; });
 
 /* ---- PWA: offline play once installed (no-op when opened as a file) ---- */
 if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {

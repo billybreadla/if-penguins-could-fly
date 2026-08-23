@@ -1,11 +1,14 @@
 /* Cache-first service worker so the game shell and runtime images play offline
    once the app is installed. */
 
-var CACHE = "ipcf-v2-pause-pwa";
+var CACHE = "ipcf-v5-ghost-photo";
 var CORE = [
   ".",
   "index.html",
   "manifest.webmanifest",
+  "images/bg0-far.webp",
+  "images/bg0-mid.webp",
+  "images/bg0-near.webp",
   "images/background.webp",
   "images/boss-card-cruiser-v5.webp",
   "images/boss-card-dreadnought-v5.webp",
@@ -25,6 +28,7 @@ var CORE = [
   "images/cloud_6.webp",
   "images/cloud_7.webp",
   "images/cloud_8.webp",
+  "images/dino-plush.webp",
   "images/dreadnought-damaged.webp",
   "images/dreadnought-wrecked.webp",
   "images/fish_0.webp",
@@ -39,6 +43,7 @@ var CORE = [
   "images/gun-deck-wrecked.webp",
   "images/hazards-v3.webp",
   "images/hero-flight-strip-v5.webp",
+  "images/hero-strip-3d-v1.webp",
   "images/heropenguin.webp",
   "images/icon-192.png",
   "images/icon-512.png",
@@ -96,14 +101,21 @@ self.addEventListener("activate", function (e) {
 self.addEventListener("fetch", function (e) {
   if (e.request.method !== "GET") return;
   e.respondWith(
-    caches.match(e.request).then(function (hit) {
-      return hit || fetch(e.request).then(function (res) {
-        if (res.status === 200 && (e.request.url.indexOf(self.location.origin) === 0)) {
-          var copy = res.clone();
-          caches.open(CACHE).then(function (c) { c.put(e.request, copy); });
-        }
-        return res;
+    /* Runtime requests carry "?v=N" while precache stores bare paths, so the
+       primary lookup ignores the query string (exact match kept as a fallback). */
+    caches.match(e.request, { ignoreSearch: true }).then(function (hit) {
+      return hit || caches.match(e.request).then(function (exact) {
+        return exact || fetch(e.request).then(function (res) {
+          if (res.status === 200 && (e.request.url.indexOf(self.location.origin) === 0)) {
+            var copy = res.clone();
+            /* store under the SAME bare key the precache uses, so versioned
+               URLs don't accumulate duplicate cache entries */
+            var bare = e.request.url.split("?")[0];
+            caches.open(CACHE).then(function (c) { c.put(bare, copy); });
+          }
+          return res;
+        });
       });
-    }).catch(function () { return caches.match("index.html"); })
+    }).catch(function () { return caches.match("index.html", { ignoreSearch: true }); })
   );
 });
