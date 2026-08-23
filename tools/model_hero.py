@@ -73,7 +73,7 @@ bpy.ops.wm.read_factory_settings(use_empty=True)
 # ---------------- plane ----------------
 prim("fuselage", 'sphere', (0.15, 0, 0.10), scale=(1.25, 0.52, 0.50), mkey="plane_blue")
 prim("nose",     'sphere', (-1.28, 0, 0.10), scale=(0.21, 0.31, 0.29), mkey="orange")
-prim("wing",          'cube',  (0.05, 0, 0.16), scale=(0.52, 1.45, 0.09), mkey="white")
+prim("wing",          'cube',  (0.05, 0, 0.13), scale=(0.50, 1.45, 0.09), mkey="white")
 prim("wingtip_l",     'sphere', (0.05, -1.40, 0.16), scale=(0.42, 0.16, 0.10), mkey="white")
 prim("wingtip_r",     'sphere', (0.05, 1.40, 0.16), scale=(0.42, 0.16, 0.10), mkey="white")
 prim("fin",           'sphere', (1.33, 0, 0.58), rot=(-16, 0, 0), scale=(0.26, 0.05, 0.38), mkey="orange")
@@ -85,7 +85,7 @@ prim("wheel_r",       'sphere', (-0.25, 0.50, -0.60), scale=(0.10, 0.05, 0.10), 
 
 # ---------------- penguin pilot ----------------
 prim("body",      'sphere', (-0.12, 0, 0.78), scale=(0.40, 0.36, 0.46), mkey="navy")
-prim("belly",     'sphere', (-0.26, 0, 0.70), scale=(0.26, 0.26, 0.36), mkey="snow")
+prim("belly",     'sphere', (-0.31, 0, 0.68), scale=(0.25, 0.27, 0.35), mkey="snow")  # protrudes past body front -> visible in profile
 prim("head",      'sphere', (-0.16, 0, 1.32), scale=(0.30, 0.29, 0.30), mkey="navy")
 prim("beak",      'cone',   (-0.50, 0, 1.30), rot=(0, -90, 0), scale=(0.11, 0.10, 0.24), mkey="orange")
 prim("eye_l",     'sphere', (-0.34, -0.16, 1.40), scale=(0.105, 0.105, 0.115), mkey="white")
@@ -99,7 +99,7 @@ prim("strap",     'torus',  (-0.13, 0, 1.47), rot=(0, 90, 0), scale=(0.30, 0.30,
 prim("lens_l",    'cyl',    (-0.33, -0.14, 1.56), rot=(0, 90, 18), scale=(0.09, 0.045, 0.09), mkey="gold")
 prim("lens_r",    'cyl',    (-0.33, 0.14, 1.56), rot=(0, 90, -18), scale=(0.09, 0.045, 0.09), mkey="gold")
 # scarf knot at the neck
-prim("scarf",     'torus',  (-0.26, 0, 1.04), rot=(12, 0, 0), scale=(0.24, 0.24, 0.24), mkey="scarf")
+prim("scarf",     'torus',  (-0.28, 0, 1.03), rot=(12, 0, 0), scale=(0.26, 0.26, 0.26), mkey="scarf")
 
 bpy.ops.export_scene.gltf(filepath=OUT, export_format='GLB', export_apply=True)
 print("EXPORTED", OUT)
