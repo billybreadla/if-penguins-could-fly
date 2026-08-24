@@ -216,6 +216,10 @@ cam.location = (0, -8, 0); cam.rotation_euler = (math.radians(90), 0, 0)
 sc.collection.objects.link(cam); sc.camera = cam
 
 def render(objs, width, path):
+    import sys, os as _os
+    sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import toon
+    toon.toonify_objects(objs, outline_frac=0.022)
     cam_d.ortho_scale = width * 1.05
     sc.frame_set(1)
     for o in objs:

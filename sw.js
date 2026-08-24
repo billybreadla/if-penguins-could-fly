@@ -1,7 +1,7 @@
 /* Cache-first service worker so the game shell and runtime images play offline
    once the app is installed. */
 
-var CACHE = "ipcf-v7-toy-box";
+var CACHE = "ipcf-v11-paint";
 var CORE = [
   ".",
   "index.html",
@@ -47,21 +47,21 @@ var CORE = [
   "images/fish_4.webp",
   "images/fish_5.webp",
   "images/fish_6.webp",
-  "images/fish3d_0.webp",
-  "images/fish3d_1.webp",
-  "images/fish3d_2.webp",
-  "images/fish3d_3.webp",
-  "images/fish3d_4.webp",
-  "images/fish3d_5.webp",
-  "images/fish3d_6.webp",
+  "images/fish3d-v5_0.webp",
+  "images/fish3d-v5_1.webp",
+  "images/fish3d-v5_2.webp",
+  "images/fish3d-v5_3.webp",
+  "images/fish3d-v5_4.webp",
+  "images/fish3d-v5_5.webp",
+  "images/fish3d-v5_6.webp",
   "images/gun-deck-damaged.webp",
   "images/gun-deck-v4.webp",
   "images/gun-deck-wrecked.webp",
   "images/hazards-v3.webp",
   "images/hero-flight-strip-v5.webp",
   "images/hero-strip-3d-v1.webp",
-  "images/hero-strip-3d-v2.webp",
-  "images/hero-spin-v1.webp",
+  "images/hero-strip-3d-v6.webp",
+  "images/hero-spin-v5.webp",
   "images/ring-3d-v1.webp",
   "images/heropenguin.webp",
   "images/icon-192.png",

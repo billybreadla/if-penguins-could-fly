@@ -4,3 +4,4 @@ publish/
 **/.DS_Store
 
 .netlify/
+__pycache__/

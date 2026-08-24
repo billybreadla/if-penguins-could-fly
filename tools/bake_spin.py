@@ -28,7 +28,7 @@ except KeyError:
     pass
 attr = nt.nodes.new('ShaderNodeVertexColor')
 try:
-    attr.attribute_name = "Col"
+    attr.attribute_name = "Color"
 except Exception:
     pass
 nt.links.new(attr.outputs['Color'], bsdf.inputs['Base Color'])
@@ -86,6 +86,11 @@ sc.render.resolution_x = sc.render.resolution_y = RES
 sc.render.film_transparent = True
 sc.render.image_settings.file_format = 'PNG'
 sc.render.image_settings.color_mode = 'RGBA'
+
+import sys as _s, os as _o
+_s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
+import toon
+toon.toonify_scene(outline_frac=0.016)
 
 import os
 tmp = "/tmp/opencode/spin"

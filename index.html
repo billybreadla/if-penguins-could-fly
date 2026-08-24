@@ -153,6 +153,23 @@ const DUSTY = { wash: [202,150,82, 0.42], dark: 0.06 };
    in the title screen's corner opens this list so Lachlan can see what changed
    between ships. Kid-facing strings only! */
 const CHANGELOG = [
+  { v: "19", date: "2026-08-24", notes: [
+    "The pilot is painted from three angles — crisp from every side",
+    "Toys catch the light: shiny glints and a warm rim glow",
+  ]},
+  { v: "18", date: "2026-08-24", notes: [
+    "The penguin and fish got real sculpted models",
+    "Crisper goggles, scarf and fins everywhere",
+  ]},
+  { v: "17", date: "2026-08-23", notes: [
+    "Cartoon ink outlines around every 3D toy",
+    "Colors now pop in bold cartoon bands",
+  ]},
+  { v: "16", date: "2026-08-23", notes: [
+    "The penguin got a real sculpt: leather cap, goggles and scarf",
+    "Every fish is a rounder, happier 3D toy — all 7 colors",
+    "The title-screen model now shows the new pilot",
+  ]},
   { v: "15", date: "2026-08-23", notes: [
     "Every sky is now a multiplane diorama — foregrounds whoosh past",
     "The fish, power-ups and boss ships are real 3D toys",
@@ -180,7 +197,7 @@ const CHANGELOG = [
 ];
 
 /* ---- Asset loading: pull from /images/, fall back to drawn shapes ---- */
-const ASSET_VER = 15;  // v15 wave: toy-box — every world multiplane, 3D fish/power-ups/bosses, title turntable
+const ASSET_VER = 19;  // v19 wave: 3-view paint job, rim light, glossy sheen, punchier bands
 function loadImg(path) {
   const img = new Image();
   img.ok = false;
@@ -202,7 +219,7 @@ const ASSETS = {
   bullet: loadImg("images/bullet.webp"),
   panic:  loadImgs("penguin_panic_", 3),  // panicked penguin variants (shown near danger)
   fish:   loadImgs("fish_", 7),    // fish_0..6 (1 + 6 = fancy/rare worth more)
-  fish3D: loadImgs("fish3d_", 7),  // v7: baked toy fish, same canvases as fish_
+  fish3D: loadImgs("fish3d-v5_", 7),  // v19: Hunyuan fish, richer color bands
   parts:  loadImgs("part_", 5),    // ship chunks that fly off the boss
   clouds: loadImgs("cloud_", 9),   // cloud_0 lightest → cloud_8 darkest
   adventure: loadImg("images/powerups-obstacle-v2.webp"), // matching power-ups + albatross atlas
@@ -213,8 +230,8 @@ const ASSETS = {
   titleHero: loadImg("images/title-hero-v5.webp"),       // start-screen key art
   wordmark:  loadImg("images/title-wordmark-v5.webp"),   // transparent logo
   heroStrip: loadImg("images/hero-flight-strip-v5.webp"),// 4x 520px flight poses (Classic)
-  heroStrip3D: loadImg("images/hero-strip-3d-v2.webp"),   // v7: same layout, baked from the Blender toy
-  heroSpin: loadImg("images/hero-spin-v1.webp"),          // v7: 16-cell turntable of the toy (title screen)
+  heroStrip3D: loadImg("images/hero-strip-3d-v6.webp"),   // v19: multi-view painted, rim light + sheen
+  heroSpin: loadImg("images/hero-spin-v5.webp"),          // v19: 16-cell turntable, painted from 3 views
   worldBg: {                                             // painted sky per world (see activeWorld)
     1: loadImg("images/world-sunset-v5.webp"),
     2: loadImg("images/world-aurora-v5.webp"),

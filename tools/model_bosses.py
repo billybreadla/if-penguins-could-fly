@@ -223,6 +223,10 @@ import os
 os.makedirs(OUT, exist_ok=True)
 
 def render(objs, bore, width, path):
+    import sys, os as _os
+    sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import toon
+    toon.toonify_objects([o for o in objs if o.type == "MESH"], outline_frac=0.010)
     s = width * 1.03
     cam_d.ortho_scale = s
     sc.render.resolution_x = sc.render.resolution_y = int(s * PX_PER_UNIT) // 16 * 16
