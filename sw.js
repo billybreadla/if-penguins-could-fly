@@ -1,7 +1,7 @@
 /* Cache-first service worker so the game shell and runtime images play offline
    once the app is installed. */
 
-var CACHE = "ipcf-v11-paint";
+var CACHE = "ipcf-v12-multiplane";
 var CORE = [
   ".",
   "index.html",
@@ -9,6 +9,24 @@ var CORE = [
   "images/bg0-far.webp",
   "images/bg0-mid.webp",
   "images/bg0-near.webp",
+  "images/bg1-far.webp",
+  "images/bg1-mid.webp",
+  "images/bg1-near.webp",
+  "images/bg2-far.webp",
+  "images/bg2-mid.webp",
+  "images/bg2-near.webp",
+  "images/bg3-far.webp",
+  "images/bg3-mid.webp",
+  "images/bg3-near.webp",
+  "images/bg4-far.webp",
+  "images/bg4-mid.webp",
+  "images/bg4-near.webp",
+  "images/bg5-far.webp",
+  "images/bg5-mid.webp",
+  "images/bg5-near.webp",
+  "images/bg7-far.webp",
+  "images/bg7-mid.webp",
+  "images/bg7-near.webp",
   "images/background.webp",
   "images/boss-card-cruiser-v5.webp",
   "images/boss-card-dreadnought-v5.webp",
@@ -92,12 +110,6 @@ var CORE = [
   "images/title-hero-v5.webp",
   "images/title-wordmark-v5.webp",
   "images/victory-penguin-v6.webp",
-  "images/w1-near.webp",
-  "images/w2-near.webp",
-  "images/w3-near.webp",
-  "images/w4-near.webp",
-  "images/w5-near.webp",
-  "images/w7-near.webp",
   "images/world-aurora-v5.webp",
   "images/world-dusty-hills-v5.webp",
   "images/world-outer-space-v5.webp",

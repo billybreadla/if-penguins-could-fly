@@ -93,6 +93,9 @@ const CONFIG = {
   haze:        0.14,   // aerial-perspective fog pooled on the horizon (fades out in dark worlds)
   shadow:      0.16,   // soft drop shadows under floating objects (0 turns them off)
   biomeLen:    7,      // rings per sky (sunny → sunset → night → snow → space)
+  decorClouds: true,   // drifting scenery clouds that swell as they cross (pure decoration, no collision)
+  contactBand: true,   // faint scrolling water/ground sheen on the plane the shadows imply
+  contactScroll: 4.6,  // contact-band shimmer speed (× bgScroll) — just in front of the near plane
 
   // --- arena 2: the Dusty Hills ---
   arena2At:    300,    // score at which you fly into the Dusty Hills
@@ -153,6 +156,11 @@ const DUSTY = { wash: [202,150,82, 0.42], dark: 0.06 };
    in the title screen's corner opens this list so Lachlan can see what changed
    between ships. Kid-facing strings only! */
 const CHANGELOG = [
+  { v: "20", date: "2026-08-24", notes: [
+    "Every world is a multiplane diorama now — skies, seas and snowfields slide on three layers",
+    "Fluffy clouds drift by and grow as they pass, like real depth",
+    "A faint shimmer ties the plane's shadow to the water below",
+  ]},
   { v: "19", date: "2026-08-24", notes: [
     "The pilot is painted from three angles — crisp from every side",
     "Toys catch the light: shiny glints and a warm rim glow",
@@ -197,7 +205,7 @@ const CHANGELOG = [
 ];
 
 /* ---- Asset loading: pull from /images/, fall back to drawn shapes ---- */
-const ASSET_VER = 19;  // v19 wave: 3-view paint job, rim light, glossy sheen, punchier bands
+const ASSET_VER = 20;  // v20 wave: every world multiplaned, depth clouds, contact band
 function loadImg(path) {
   const img = new Image();
   img.ok = false;
@@ -207,6 +215,7 @@ function loadImg(path) {
   return img;
 }
 function loadImgs(prefix, n) { const a = []; for (let i = 0; i < n; i++) a.push(loadImg(`images/${prefix}${i}.webp`)); return a; }
+function loadPlanes(p) { return { far: loadImg(`images/${p}-far.webp`), mid: loadImg(`images/${p}-mid.webp`), near: loadImg(`images/${p}-near.webp`) }; }
 const ASSETS = {
   bg:     loadImg("images/background.webp"),
   player: loadImg("images/heropenguin.webp"),
@@ -284,28 +293,31 @@ const ASSETS = {
     mid:  loadImg("images/bg0-mid.webp"),    // tree-line cutout (mountains show through gaps)
     near: loadImg("images/bg0-near.webp"),   // grass strip + water
   },
-  // --- V7 depth: worlds 1-7 foreground bands cut from each painting (tools/slice_worlds.py).
-  // The painting itself tiles at 1x underneath; its foreground slides on top at WORLD_NEAR speed. ---
-  worldNear: {
-    1: loadImg("images/w1-near.webp"),
-    2: loadImg("images/w2-near.webp"),
-    3: loadImg("images/w3-near.webp"),
-    4: loadImg("images/w4-near.webp"),
-    5: loadImg("images/w5-near.webp"),
-    6: loadImg("images/w7-near.webp"),   // boss sky shares the storm painting
-    7: loadImg("images/w7-near.webp"),
+  // --- depth wave: every painted world sliced into three parallax planes
+  // (tools/slice_world.py). far/mid/near scroll at 1x / bgMid / bgNear, same
+  // as world 0; the plain painting stays loaded as the fallback. ---
+  worldPlanes: {
+    1: loadPlanes("bg1"),
+    2: loadPlanes("bg2"),
+    3: loadPlanes("bg3"),
+    4: loadPlanes("bg4"),
+    5: loadPlanes("bg5"),
+    6: loadPlanes("bg7"),   // boss sky shares the storm painting
+    7: loadPlanes("bg7"),
   },
 };
-/* Foreground band placement per world (fractions of screen height). Must match
-   the band tops in tools/slice_worlds.py — the band is drawn at [top, 1]. */
-const WORLD_NEAR = {
-  1: { top: 0.76, speed: 3.0 },   // sunset cliffs + sea
-  2: { top: 0.76, speed: 3.0 },   // aurora ridge + ice
-  3: { top: 0.55, speed: 2.6 },   // snowy range + cliffs
-  4: { top: 0.77, speed: 3.0 },   // moon surface
-  5: { top: 0.62, speed: 3.2 },   // dusty rocks + floor
-  6: { top: 0.78, speed: 3.0 },   // storm peaks + sea
-  7: { top: 0.78, speed: 3.0 },
+/* Multiplane band placement per world (fractions of screen height). Must match
+   the per-world tables in tools/slice_world.py — all three bands are cut from
+   the same painting, so one shared px→screen scale fits every layer. sky/ground
+   are the base-gradient stops showing through the feathered band edges. */
+const WORLD_BANDS = {
+  1: { sky: "#bc335b", ground: "#9c5262", far: { top: 0.00, bot: 0.90 }, mid: { top: 0.86, bot: 0.96 }, near: { top: 0.92, bot: 1.00 } },
+  2: { sky: "#001144", ground: "#1368c1", far: { top: 0.00, bot: 0.88 }, mid: { top: 0.86, bot: 0.96 }, near: { top: 0.92, bot: 1.00 } },
+  3: { sky: "#5acaf9", ground: "#54b7f3", far: { top: 0.00, bot: 0.86 }, mid: { top: 0.84, bot: 0.96 }, near: { top: 0.92, bot: 1.00 } },
+  4: { sky: "#03082f", ground: "#0b2f74", far: { top: 0.00, bot: 0.90 }, mid: { top: 0.88, bot: 0.97 }, near: { top: 0.93, bot: 1.00 } },
+  5: { sky: "#3694b7", ground: "#bf5131", far: { top: 0.00, bot: 0.84 }, mid: { top: 0.82, bot: 0.94 }, near: { top: 0.90, bot: 1.00 } },
+  6: { sky: "#0b0c33", ground: "#010c3c", far: { top: 0.00, bot: 0.90 }, mid: { top: 0.88, bot: 0.97 }, near: { top: 0.93, bot: 1.00 } },
+  7: { sky: "#0b0c33", ground: "#010c3c", far: { top: 0.00, bot: 0.90 }, mid: { top: 0.88, bot: 0.97 }, near: { top: 0.93, bot: 1.00 } },
 };
 /* Where each bg0 slice sits on screen (fractions of the source painting's
    height). All three are cut from the same painting, so one shared
@@ -466,6 +478,7 @@ let storyPage = 0;
 let tutorialStep = 0, tutorialT = 0;
 
 let player, rings, fish, powerups, birds, gusts, particles, texts;
+let decorClouds;                          // scale-by-depth scenery clouds (pure decoration)
 let missionItems, friendlyShots;
 let speed, score, passed, best, bgX, holding, shakeT, propAngle;
 let steeringLeft = false, steeringRight = false;
@@ -474,7 +487,7 @@ const flightTouchIds = new Set();
 const touchCapable = (navigator.maxTouchPoints || 0) > 0 || "ontouchstart" in window;
 let combo, lastScoreT;
 let starT, magnetT, slowT, graceT, hasShield;
-let trailAcc, birdCooldown, gustCooldown, pairNext, nextSpacing, lastGapY;
+let trailAcc, birdCooldown, gustCooldown, decorCd, pairNext, nextSpacing, lastGapY;
 let washCur, darkCur, starAmt, snowAmt, dustAmt, lastBiome;
 let arena, banner, bannerT, overAt = 0;
 let bossActive, bossBeaten, bossPhase, boss, shots, bossT, bossShootCd, bossPartsThrown, diedAtBoss;
@@ -545,7 +558,7 @@ function initAmbient() {
 
 function reset() {
   player = { x: W * CONFIG.playerX, y: H * 0.45, vx: 0, vy: 0, angle: 0 };
-  rings = []; fish = []; powerups = []; birds = []; gusts = []; particles = []; texts = [];
+  rings = []; fish = []; powerups = []; birds = []; gusts = []; particles = []; texts = []; decorClouds = [];
   missionItems = []; friendlyShots = [];
   speed = CONFIG.startSpeed;
   score = 0; passed = 0; bgX = 0; holding = false; shakeT = 0; propAngle = 0;
@@ -560,7 +573,7 @@ function reset() {
   perfectStreak = 0; perfectTotal = 0; nearMissT = 0;
   approachT = 0; mapT = 0;
   bossAmmo = 0; bossSupplyCd = 3.5;
-  trailAcc = 0; birdCooldown = H * 2; gustCooldown = H * 1.2;
+  trailAcc = 0; birdCooldown = H * 2; gustCooldown = H * 1.2; decorCd = H * 0.5;
   plush = null; climbAmt = 0; steerAxis = 0; keySteer = 0; kbHolding = false; keysDown.clear();
   // ghost races: every run records fresh; a ghost only rides along when RACE was tapped
   runT = 0; lastRecT = 0; ghostRec = []; ghostRun = null;
@@ -1037,6 +1050,23 @@ function update(dt) {
   const moveLeft = (arr) => { for (const o of arr) o.x -= worldDx; };
   moveLeft(rings); moveLeft(fish); moveLeft(powerups); moveLeft(gusts); moveLeft(missionItems);
 
+  // decorative far clouds: spawn small (0.55-0.75 scale) and swell toward 1.15
+  // as they cross — draw-only, nothing collides with them
+  if (CONFIG.decorClouds) {
+    decorCd -= worldDx;
+    if (decorCd <= 0) {
+      decorClouds.push({
+        x: W + H * 0.35, y: rand(0.08, 0.52) * H, s0: rand(0.55, 0.75),
+        img: Math.floor(rand(0, 3)),                    // light clouds only (0-2)
+        a: 0.9 * Math.max(0.25, 1 - darkCur * 1.5),     // fade out in night/space skies
+        p: rand(0, 6.28),
+      });
+      decorCd = H * rand(0.9, 1.9);
+    }
+  }
+  for (const c of decorClouds) c.x -= worldDx * 0.55;   // far away → slower than the world
+  while (decorClouds.length && decorClouds[0].x < -W * 0.35) decorClouds.shift();
+
   // player hit radius (used by boss shots; rings compute their own below)
   const phhAll = (drawW * (616 / 940) * CONFIG.hitScale) / 2;
 
@@ -1308,6 +1338,7 @@ function startBoss(lvl) {
   bossActive = true; bossPhase = 1; bossT = 0; bossShootCd = 0; bossPartsThrown = 0;
   shots = []; friendlyShots = []; bossAmmo = 0; bossSupplyCd = 2.4;
   rings = []; fish = []; powerups = []; birds = []; gusts = []; missionItems = []; plush = null; // clear the arena
+  decorClouds = [];   // boss arenas get a clean sky
   const segment = lvl === 2, finalBoss = lvl >= 3, big = lvl >= 2;
   const fleet = CONFIG.boss3D && ASSETS.boss3D[lvl] && ASSETS.boss3D[lvl][0].ok;
   const spr= fleet ? ASSETS.boss3D[lvl][0] : segment ? ASSETS.gunDeck : big ? ASSETS.boss2 : ASSETS.boss;
@@ -1569,16 +1600,23 @@ function drawTiledBg(img) {            // horizontally-tiling parallax backgroun
   let x = bgX % tileW; if (x > 0) x -= tileW;
   for (let dx = x; dx < W; dx += tileW) ctx.drawImage(img, dx, 0, tileW, H);
 }
-function drawBgBand(img, band, speedMul) {   // one tiled multiplane layer
+function drawBgBand(img, band, speedMul, mirror = true) {   // one tiled multiplane layer
   const y = band.top * H, h = (band.bot - band.top) * H;
   const s = h / img.height;                  // bands are cut from the painting, so this fits every layer
   const tileW = img.width * s;
   /* mirror-tile (odd copies flipped) so adjacent tiles share edge pixels —
-     no seam even on high-contrast content like cliffs */
-  const off = ((bgX * speedMul) % (tileW * 2) + tileW * 2) % (tileW * 2);
-  for (let dx = -off, k = 0; dx < W; dx += tileW, k++) {
-    if (k & 1) { ctx.save(); ctx.translate(dx + tileW, y); ctx.scale(-1, 1); ctx.drawImage(img, 0, 0, tileW, h); ctx.restore(); }
-    else ctx.drawImage(img, dx, y, tileW, h);
+     no seam even on high-contrast content like cliffs. The world paintings are
+     authored to tile by repeat (matching edge columns), so they pass
+     mirror=false — flipping them shows butterfly artifacts. */
+  if (mirror) {
+    const off = ((bgX * speedMul) % (tileW * 2) + tileW * 2) % (tileW * 2);
+    for (let dx = -off, k = 0; dx < W; dx += tileW, k++) {
+      if (k & 1) { ctx.save(); ctx.translate(dx + tileW, y); ctx.scale(-1, 1); ctx.drawImage(img, 0, 0, tileW, h); ctx.restore(); }
+      else ctx.drawImage(img, dx, y, tileW, h);
+    }
+  } else {
+    const off = ((bgX * speedMul) % tileW + tileW) % tileW;
+    for (let dx = -off; dx < W; dx += tileW) ctx.drawImage(img, dx, y, tileW, h);
   }
 }
 function drawMultiplaneBg0() {   // world 0 in three parallax planes cut from one painting
@@ -1588,6 +1626,15 @@ function drawMultiplaneBg0() {   // world 0 in three parallax planes cut from on
   drawBgBand(ASSETS.bg0.far, BG0_BANDS.far, 1);
   drawBgBand(ASSETS.bg0.mid, BG0_BANDS.mid, CONFIG.bgMid);
   drawBgBand(ASSETS.bg0.near, BG0_BANDS.near, CONFIG.bgNear);
+}
+function drawMultiplaneWorld(world) {   // painted worlds, same three-plane treatment
+  const B = WORLD_BANDS[world], P = ASSETS.worldPlanes[world];
+  const g = ctx.createLinearGradient(0, 0, 0, H);   // world's own sky→ground base
+  g.addColorStop(0, B.sky); g.addColorStop(1, B.ground);   // under the feathered edges
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  drawBgBand(P.far, B.far, 1, false);
+  drawBgBand(P.mid, B.mid, CONFIG.bgMid, false);
+  drawBgBand(P.near, B.near, CONFIG.bgNear, false);
 }
 function drawCoverImage(img) {          // object-fit: cover, full screen
   const s = Math.max(W / img.width, H / img.height);
@@ -1604,13 +1651,13 @@ function drawImageCoverRect(img, rx, ry, rw, rh, r) {   // object-fit: cover int
 function drawBackground() {
   const world = activeWorld();
   const painted = world === 0 ? ASSETS.bg : (ASSETS.worldBg[world] || null);
+  const P = ASSETS.worldPlanes[world];
   if (world === 0 && ASSETS.bg0.far.ok && ASSETS.bg0.mid.ok && ASSETS.bg0.near.ok) {
     drawMultiplaneBg0();
+  } else if (P && WORLD_BANDS[world] && P.far.ok && P.mid.ok && P.near.ok) {
+    drawMultiplaneWorld(world);
   } else if (painted && painted.ok) {
     drawTiledBg(painted);
-    // v7 depth: the world's own foreground slides over its static sky
-    const near = ASSETS.worldNear[world], spec = WORLD_NEAR[world];
-    if (near && near.ok && spec) drawBgBand(near, { top: spec.top, bot: 1.0 }, spec.speed);
   } else if (world === 0) {
     const g = ctx.createLinearGradient(0, 0, 0, H);
     g.addColorStop(0, "#4fb6f5"); g.addColorStop(0.7, "#9fd8fb");
@@ -1651,6 +1698,41 @@ function drawDepthHaze() {   // aerial perspective: pale fog pooled where the fa
   g.addColorStop(0.72, `rgba(232,246,255,${a})`);
   g.addColorStop(1, "rgba(232,246,255,0)");
   ctx.fillStyle = g; ctx.fillRect(0, top, W, H * 0.46);
+}
+function drawContactBand() {   // faint water/ground sheen on the plane the shadows imply —
+  if (!CONFIG.contactBand || CONFIG.shadow < 0.01) return;   // sits where a shadow at cruise
+  const cy = H * 0.585, h = H * 0.11;                        // altitude (+0.135H) would land
+  const a = 0.10 * Math.max(0, 1 - darkCur * 1.6);           // fades out in dark worlds
+  if (a < 0.01) return;
+  const g = ctx.createLinearGradient(0, cy - h / 2, 0, cy + h / 2);
+  g.addColorStop(0, "rgba(16,42,86,0)");
+  g.addColorStop(0.5, `rgba(16,42,86,${a})`);
+  g.addColorStop(1, "rgba(16,42,86,0)");
+  ctx.fillStyle = g; ctx.fillRect(0, cy - h / 2, W, h);
+  // shimmer streaks drifting at their own speed — one more plane, in front of the near band
+  const span = W + h * 2;
+  ctx.strokeStyle = `rgba(255,255,255,${Math.min(0.16, a * 1.2)})`;
+  ctx.lineCap = "round"; ctx.lineWidth = Math.max(1.5, H * 0.004);
+  for (let i = 0; i < 9; i++) {
+    const seed = i * 127.31;
+    const yy = cy + Math.sin(seed) * h * 0.35;
+    const len = h * (0.35 + 0.3 * Math.abs(Math.sin(seed * 1.7)));
+    const x = (((seed * 97 - bgX * CONFIG.contactScroll * CONFIG.bgScroll * H) % span) + span) % span - len;
+    ctx.beginPath(); ctx.moveTo(x, yy); ctx.lineTo(x + len, yy); ctx.stroke();
+  }
+}
+function drawDecorClouds() {   // scale-by-depth scenery: spawn small and far, swell as they pass
+  for (const c of decorClouds) {
+    const img = ASSETS.clouds[c.img];
+    if (!img || !img.ok) continue;
+    const t = clamp(1 - c.x / (W * 1.3), 0, 1);              // 0 at spawn → 1 leaving the screen
+    const s = reducedMotion ? (c.s0 + 1.15) / 2 : lerp(c.s0, 1.15, t);   // no swelling under reduced motion
+    const w = H * 0.30 * s, h = w * (img.height / img.width);
+    const bob = reducedMotion ? 0 : Math.sin(c.p + c.x * 0.004) * H * 0.012;
+    ctx.globalAlpha = c.a;
+    ctx.drawImage(img, c.x - w / 2, c.y + bob - h / 2, w, h);
+    ctx.globalAlpha = 1;
+  }
 }
 function drawSoftShadow(x, y, rx, ry, alpha) {   // soft ellipse "contact" shadow —
   if (alpha < 0.01) return;                      // grounds objects floating in front of the sky
@@ -2903,6 +2985,8 @@ function frame(now) {
   drawBackground();
   drawStars();
   drawDepthHaze();
+  drawContactBand();
+  drawDecorClouds();
   drawObjectShadows();
   drawFish();
   drawPowerups();

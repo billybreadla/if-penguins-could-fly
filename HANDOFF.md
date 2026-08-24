@@ -17,14 +17,17 @@ Every feature reverts with a one-line CONFIG flip.
 | `boss3D` | true | painted boss/gun-deck/dreadnought set |
 | `titleSpin3D` | true | no turntable on title |
 | `haze` / `shadow` | 0.14 / 0.16 | 0 disables each |
-| `bgMid` / `bgNear` | 2.2 / 3.8 | world-0 multiplane speeds |
+| `bgMid` / `bgNear` | 2.2 / 3.8 | multiplane mid/near speeds (all worlds) |
+| `decorClouds` / `contactBand` | true | depth clouds / shadow-plane sheen (0-style flags) |
 
 ## What was built (all verified in headless Chrome, zero uncaught errors)
-- **Worlds 1–7 multiplane** (`tools/slice_worlds.py` → `images/w{1,2,3,4,5,7}-near.webp`):
-  each painting keeps a static sky; a foreground band (cliffs/ridge/range/moon/rocks/peaks)
-  slides over it at `WORLD_NEAR[world].speed`. Band tops chosen so no object straddles the
-  feather. `drawBgBand` mirror-tiles (odd copies flipped) so there are NO tile seams even on
-  high-contrast cliffs. `drawBackground` layers band over `drawTiledBg` when `worldNear.ok`.
+- **Worlds 1–7 multiplane** (`tools/slice_world.py` → `images/bg{1..5,7}-{far,mid,near}.webp`):
+  every painting split into three parallax planes like world 0 — far (sky + landforms, 1x),
+  mid + near (feathered ground/sea strips at `bgMid`/`bgNear`). Per-world band fractions live
+  in `WORLDS` (slicer) and `WORLD_BANDS` (runtime) and MUST stay in sync; the slicer also
+  carries each world's sky/ground gradient stops. Paintings tile by repeat (matched edge
+  columns), so the world path passes `mirror=false` to `drawBgBand` — world 0 keeps mirroring.
+  `drawBackground` falls back to the plain painting if any plane fails to load.
 - **Fish ×7** (`tools/model_props.py` + `compose_props.py` → `fish3d_0..6.webp`): one toy
   fish mesh, palettes sampled from the painted originals, canvases sized identical to
   fish_0..6 so `drawFish` math is untouched. Tutorial legend icon follows the same flag.
@@ -92,7 +95,7 @@ Every feature reverts with a one-line CONFIG flip.
   (hero v2 tweaks) + new: `HANDOFF.md`, `images/hero-strip-3d-v2.webp`,
   `images/ring-3d-v1.webp`, `images/w{1,2,3,4,5,7}-near.webp`, `images/fish3d_0..6.webp`,
   `images/powerups-3d.webp`, `images/boss3d-*.webp` (9), `images/hero-spin-v1.webp`,
-  `tools/{slice_worlds,model_props,compose_props,model_bosses,compose_bosses,bake_ring,
+  `tools/{slice_world,model_props,compose_props,model_bosses,compose_bosses,bake_ring,
   bake_spin}.py`, `tools/worlds-preview.png`.
 - `images/dino-plush.webp`: appeared untracked, not agent-created, wired into the game by
   Billy's v13/v14 waves. Leave alone.
