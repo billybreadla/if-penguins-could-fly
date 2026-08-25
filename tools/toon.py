@@ -10,7 +10,10 @@ Import from a bake script:
     import toon
     toon.toonify_scene(outline_frac=0.015)
 """
-import bpy
+import bpy, os
+
+# rim+sheen strength knob: 1.0 for characters, lower for big flat machines
+TOON_POP = float(os.environ.get("TOON_POP", "1.0"))
 
 BANDS = ((0.46, 0.48, 0.62, 1), (0.86, 0.87, 0.92, 1), (1.10, 1.10, 1.10, 1))
 BAND_POS = (0.0, 0.42, 0.76)
@@ -90,7 +93,7 @@ def toonify_material(mat):
     fmul.inputs["Color2"].default_value = (1.0, 0.93, 0.80, 1)  # warm rim
     fadd = nt.nodes.new("ShaderNodeMixRGB")
     fadd.blend_type = "ADD"
-    fadd.inputs["Fac"].default_value = 0.32
+    fadd.inputs["Fac"].default_value = 0.32 * TOON_POP
 
     if src_node is not None:
         nt.links.new(src, diff.inputs["Color"])
@@ -106,7 +109,7 @@ def toonify_material(mat):
     gmul = nt.nodes.new("ShaderNodeMixRGB")
     gmul.blend_type = "MULTIPLY"
     gmul.inputs["Fac"].default_value = 1.0
-    gmul.inputs["Color2"].default_value = (0.45, 0.45, 0.5, 1)
+    gmul.inputs["Color2"].default_value = (0.45 * TOON_POP, 0.45 * TOON_POP, 0.5 * TOON_POP, 1)
     nt.links.new(gloss.outputs[0], gs2r.inputs[0])
     nt.links.new(gs2r.outputs[0], gramp.inputs[0])
     nt.links.new(mix.outputs[0], gmul.inputs["Color1"])

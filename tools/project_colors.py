@@ -37,15 +37,32 @@ def _load(path):
     W, H = img.size
     px = np.empty(W * H * 4, dtype=np.float32)
     img.pixels.foreach_get(px)
-    return px.reshape(H, W, 4)
+    px = px.reshape(H, W, 4).copy()
+    # inpaint white background gaps (visible through mesh concavities):
+    # fill each white pixel with the nearest non-white pixel in its row
+    nonwhite = px[..., :3].min(-1) < 0.72   # eat AA halos too
+    xs = np.arange(W)[None, :]
+    idx = np.where(nonwhite, xs, -1)
+    fwd = np.maximum.accumulate(idx, axis=1)
+    bwd = np.minimum.accumulate(idx[:, ::-1], axis=1)[:, ::-1]
+    has_f = fwd >= 0
+    has_b = bwd >= 0
+    use_f = has_f & (~has_b | (xs - fwd <= bwd - xs))
+    nearest = np.where(use_f, fwd, bwd)
+    nearest = np.clip(nearest, 0, W - 1)
+    rows = np.arange(H)[:, None]
+    px[~nonwhite] = px[rows, nearest][~nonwhite]
+    return px
 
 
-def project_multi(objs, views, fallback=(0.6, 0.6, 0.6)):
+def project_multi(objs, views, fallback=(0.24, 0.23, 0.22)):
     bpy.context.view_layer.update()
 
     loaded = []
     for v in views:
         px = _load(v["img"])
+        if v.get("flip"):
+            px = px[:, ::-1].copy()   # mirrored view (no PIL inside blender)
         bx0, by0, bx1, by1 = _content_bbox(px)
         campos = np.array(v["campos"], dtype=np.float64)
         loaded.append({
@@ -86,7 +103,7 @@ def project_multi(objs, views, fallback=(0.6, 0.6, 0.6)):
         wsum = np.zeros(n, dtype=np.float64)
         for V in loaded:
             w = np.maximum(0.0, wn @ V["wdir"]) ** 3   # sharp view selection
-            mask = w > 0.02
+            mask = w > 0.15   # reject grazing/noisy normals (white bg speckles)
             if not mask.any():
                 continue
             axis = V["axis"]
