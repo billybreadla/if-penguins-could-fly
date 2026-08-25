@@ -1,7 +1,7 @@
 /* Cache-first service worker so the game shell and runtime images play offline
    once the app is installed. */
 
-var CACHE = "ipcf-v13-bossfleet";
+var CACHE = "ipcf-v14-torus";
 var CORE = [
   ".",
   "index.html",
@@ -80,7 +80,7 @@ var CORE = [
   "images/hero-strip-3d-v1.webp",
   "images/hero-strip-3d-v6.webp",
   "images/hero-spin-v5.webp",
-  "images/ring-3d-v2.webp",
+  "images/ring-3d-v3.webp",
   "images/heropenguin.webp",
   "images/icon-192.png",
   "images/icon-512.png",

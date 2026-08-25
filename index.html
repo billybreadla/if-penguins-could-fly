@@ -156,6 +156,9 @@ const DUSTY = { wash: [202,150,82, 0.42], dark: 0.06 };
    in the title screen's corner opens this list so Lachlan can see what changed
    between ships. Kid-facing strings only! */
 const CHANGELOG = [
+  { v: "22", date: "2026-08-24", notes: [
+    "Rings are true golden torus now — see-through center, polished depth and shine",
+  ]},
   { v: "21", date: "2026-08-24", notes: [
     "Boss fleet rebuilt: real sculpted warships, not blockouts",
     "Golden rings got their ornate paint job",
@@ -209,7 +212,7 @@ const CHANGELOG = [
 ];
 
 /* ---- Asset loading: pull from /images/, fall back to drawn shapes ---- */
-const ASSET_VER = 21;  // v20 wave: every world multiplaned, depth clouds, contact band
+const ASSET_VER = 22;  // v22: ring rebuilt as see-through shaded torus
 function loadImg(path) {
   const img = new Image();
   img.ok = false;
@@ -224,7 +227,7 @@ const ASSETS = {
   bg:     loadImg("images/background.webp"),
   player: loadImg("images/heropenguin.webp"),
   rings:  loadImg("images/rings.webp"),
-  ring3D: loadImg("images/ring-3d-v2.webp"),      // v21: painted ornate ring (hole frac == RING.holeFrac)
+  ring3D: loadImg("images/ring-3d-v3.webp"),      // v22: painted torus, transparent hole + baked depth
   boss:   loadImg("images/boss.webp"),
   boss2:  loadImg("images/boss2.webp"),    // the Dreadnought mothership (boss 2)
   gunDeck: loadImg("images/gun-deck-v4.webp"),
