@@ -1,7 +1,7 @@
 /* Cache-first service worker so the game shell and runtime images play offline
    once the app is installed. */
 
-var CACHE = "ipcf-v14-torus";
+var CACHE = "ipcf-v18-panic-overlay";
 var CORE = [
   ".",
   "index.html",
@@ -79,8 +79,11 @@ var CORE = [
   "images/hero-flight-strip-v5.webp",
   "images/hero-strip-3d-v1.webp",
   "images/hero-strip-3d-v6.webp",
+  "images/hero-strip-3d-v8.webp",
   "images/hero-spin-v5.webp",
-  "images/ring-3d-v3.webp",
+  "images/ring-3d-v4.webp",
+  "images/ring-3d-v5.webp",
+  "images/mine-3d-v1.webp",
   "images/heropenguin.webp",
   "images/icon-192.png",
   "images/icon-512.png",

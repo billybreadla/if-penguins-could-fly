@@ -29,6 +29,18 @@ bpy.context.scene.collection.objects.link(plane_root)
 for o in plane_meshes:
     o.parent = plane_root
 
+# normalize the plane: center bounds, longest side -> the procedural plane's 3.64 span
+pmins = Vector((1e9,) * 3); pmaxs = Vector((-1e9,) * 3)
+for o in plane_meshes:
+    for c in o.bound_box:
+        w = o.matrix_world @ Vector(c)
+        pmins = Vector(map(min, pmins, w)); pmaxs = Vector(map(max, pmaxs, w))
+psize = max(pmaxs - pmins); pcenter = (pmins + pmaxs) / 2
+plane_root.scale = ((3.64 / psize),) * 3
+plane_root.location = tuple(-c * 3.64 / psize for c in pcenter)
+PLANE_YAW = float(os.environ.get("PLANE_YAW", "-90"))
+plane_root.rotation_euler = Euler((0, 0, math.radians(PLANE_YAW)))
+
 bpy.ops.import_scene.gltf(filepath=PENG)
 peng_meshes = [o for o in bpy.context.scene.objects if o.type == 'MESH' and o not in plane_meshes]
 # normalize penguin: center bounds, longest side = 2
@@ -134,6 +146,30 @@ if PENG_REF:
     bpy.context.view_layer.update()
     project_colors.project_multi(peng_meshes, views)
     for o in plane_meshes:
+        o.hide_set(False)
+
+# v24: paint the plane sculpt from its own ref (side + mirrored back, boss-style).
+# The plane is rotated PLANE_YAW so its nose faces -X; the painted flank then
+# faces -Y (the default camera side).
+PLANE_REF = os.environ.get("PLANE_REF")
+if PLANE_REF:
+    import project_colors
+    for o in plane_meshes:
+        mod = o.modifiers.new("dec", "DECIMATE")
+        mod.ratio = 0.35
+        bpy.context.view_layer.objects.active = o
+        o.select_set(True)
+        bpy.ops.object.modifier_apply(modifier="dec")
+        o.select_set(False)
+    bpy.context.view_layer.update()
+    pviews = [{"img": PLANE_REF, "campos": (0, -1, 0), "u_axis": 0, "u_sign": 1}]
+    if os.environ.get("PLANE_BACK"):
+        pviews.append({"img": os.environ["PLANE_BACK"], "campos": (0, 1, 0), "u_axis": 0, "u_sign": -1})
+    for o in peng_meshes:
+        o.hide_set(True)
+    bpy.context.view_layer.update()
+    project_colors.project_multi(plane_meshes, pviews)
+    for o in peng_meshes:
         o.hide_set(False)
 
 if not EXPORT_MODE:

@@ -79,86 +79,94 @@ def bosses():
 
 
 def ring():
-    """Compose the painted ring ref into the 287x520 cell with baked depth.
+    """Compose the painted ring ref into the engine's tilted-torus cell.
 
-    Hole is measured from the center row/col runs and cut as a TRANSPARENT
-    ellipse — flood fills leak through anti-aliased seams in the painted
-    outline, and the hole must stay see-through (penguin flies through).
-    Depth cues baked into the paint: torus inner-wall shading visible
-    through the hole, top-left form shading (warm lit / cool shade),
-    a luminance bevel that stamps the ornament relief, specular glints,
-    plus a soft drop shadow composited in the cell.
+    Engine contract (RING3D_FRAME / bake_ring.py): the 287x520 cell IS the
+    ring — outer ellipse 287x520 (yaw-tilted, width = RING.aspect 0.55 of
+    height), hole 166x301 centered (holeH == 520 * RING.holeFrac). The
+    circular painted ring is inverse-remapped into that ellipse, then depth
+    is baked in final space: the far-side inner wall visible through the
+    hole, top-left form shading (warm lit / cool shade), a luminance bevel
+    that stamps the ornament relief, and specular glints.
     """
+    CW, CH = 287, 520
+    HOLE_H = 301.0                    # RING3D_FRAME.holeH — must match exactly
+    HOLE_W = HOLE_H * 0.55            # same tilt squash as the outer ellipse
+    OUT_RR = (CH / 2) / (HOLE_H / 2)  # outer edge in hole units (1.727)
     im = Image.open("images/generated-refs/ring.png").convert("RGB")
-    a = np.asarray(im).astype(np.float32)
-    nonwhite = a.min(-1) < 235   # uint8! ~0.92*255
-    H, W = nonwhite.shape
-    cy, cx = H // 2, W // 2
-    row = np.where(nonwhite[cy])[0]
-    col = np.where(nonwhite[:, cx])[0]
-    hx0, hx1 = row[row < cx].max(), row[row > cx].min()   # inner edges on row
-    hy0, hy1 = col[col < cy].max(), col[col > cy].min()
-    ox0, ox1 = row.min(), row.max()                       # outer edges
-    oy0, oy1 = col.min(), col.max()
-    hole_w, hole_h = hx1 - hx0, hy1 - hy0
-    rr_out = max((oy1 - oy0) / hole_h, (ox1 - ox0) / hole_w)
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-    rr = np.hypot((xx - cx) / (hole_w / 2), (yy - cy) / (hole_h / 2))
-    theta = np.arctan2(yy - cy, xx - cx)                  # y down: -pi/2 = up
+    src = np.asarray(im).astype(np.float32)
+    nonwhite = src.min(-1) < 235   # uint8! ~0.92*255
+    Hs, Ws = nonwhite.shape
+    scy, scx = Hs // 2, Ws // 2
+    row = np.where(nonwhite[scy])[0]
+    col = np.where(nonwhite[:, scx])[0]
+    hx0, hx1 = row[row < scx].max(), row[row > scx].min()   # inner edges on row
+    hy0, hy1 = col[col < scy].max(), col[col > scy].min()
+    hw, hh = (hx1 - hx0) / 2, (hy1 - hy0) / 2
+    rr_out_src = max((col.max() - col.min()) / 2 / hh, (row.max() - row.min()) / 2 / hw)
 
-    # alpha: paint opaque, hole fully transparent, eat the AA seam near it
-    alpha = np.where(nonwhite, 255.0, 0.0)
-    alpha[rr <= 1.12] = 0
-    alpha[(rr <= 1.18) & (a.min(-1) > 215)] = 0
+    yd, xd = np.mgrid[0:CH, 0:CW].astype(np.float32)
+    ux = (xd - CW / 2) / (HOLE_W / 2)
+    vy = (yd - CH / 2) / (HOLE_H / 2)
+    rr = np.hypot(ux, vy)             # 1 = hole edge, OUT_RR = outer edge
+    th = np.arctan2(vy, ux)
+    feather = np.clip((OUT_RR - rr) / 0.03, 0, 1)
+    alpha = np.where(rr <= OUT_RR - 0.012, 255.0 * feather, 0.0)
+    alpha[rr < 1.0] = 0
+
+    # inverse map cell -> circular source art (band stretch, hole->hole outer->outer;
+    # sample radius clamped just inside the ref's outer AA halo to avoid white fringe)
+    rr_cap = rr_out_src - 0.02
+    rr_s = 1 + (rr - 1) * (rr_cap - 1) / (OUT_RR - 1)
+    xs = scx + np.cos(th) * rr_s * hw
+    ys = scy + np.sin(th) * rr_s * hh
+    x0 = np.clip(np.floor(xs).astype(int), 0, Ws - 2)
+    y0 = np.clip(np.floor(ys).astype(int), 0, Hs - 2)
+    fx = np.clip(xs - x0, 0, 1)[..., None]
+    fy = np.clip(ys - y0, 0, 1)[..., None]
+    a = (src[y0, x0] * (1 - fx) * (1 - fy) + src[y0, x0 + 1] * fx * (1 - fy)
+         + src[y0 + 1, x0] * (1 - fx) * fy + src[y0 + 1, x0 + 1] * fx * fy)
     band = alpha > 0
 
-    # 1. torus inner wall seen through the hole (dark at top, lit at bottom)
-    wall = np.clip((1.0 + 0.32 * (rr_out - 1) - rr) / (0.32 * (rr_out - 1)), 0, 1) ** 1.4 * band
-    f = 0.86 + 0.30 * np.sin(theta)
-    a *= (1 + (f - 1) * wall)[..., None]
+    # 1. far-side inner wall seen through the hole (tilt: far side = right)
+    cth = np.cos(th)
+    depth = 0.30 * np.clip(cth, 0, 1) ** 1.5
+    wall = (rr < 1.0) & (rr > 1 - np.maximum(depth, 1e-6)) & (cth > 0.03)
+    wgt = np.clip((1 - rr) / np.maximum(depth, 1e-6), 0, 1)[wall]
+    ramp = 0.78 + 0.30 * np.sin(th[wall])              # darker top, lighter bottom
+    a[wall] = np.array([128, 89, 26], np.float32) * ramp[..., None] * (0.85 + 0.35 * (1 - wgt))[..., None]
+    rim = wall & (rr < 1 - depth * 0.90)               # dark line at the wall's far edge
+    a[rim] *= 0.55
+    alpha[wall] = 255
+    band = alpha > 0
 
-    # 2. form shading from top-left, warm lit side / cool shade side
+    # 2. near-side inner edge catches the light (bright rim, left of hole)
+    near = band & (rr < 1.07) & (rr > 1.0) & (cth < -0.15)
+    a[near] = np.clip(a[near] * 1.16 + 10, 0, 255)
+
+    # 3. form shading from top-left, warm lit side / cool shade side
     thL = np.deg2rad(-135)
-    c = np.cos(theta - thL)
-    wform = np.clip((rr - 1.18) / 0.45, 0, 1) * np.clip((rr_out * 1.04 - rr) / 0.30, 0, 1) * band
-    for i, k in enumerate((0.11, 0.08, 0.03)):
+    c = np.cos(th - thL)
+    wform = np.clip((rr - 1.06) / 0.16, 0, 1) * np.clip((OUT_RR * 1.02 - rr) / 0.10, 0, 1) * band
+    for i, k in enumerate((0.12, 0.09, 0.04)):
         a[..., i] *= 1 + k * c * wform
 
-    # 3. bevel: relief from the blurred luminance field, light top-left
+    # 4. bevel: relief from the blurred luminance field, light top-left
     L = np.asarray(Image.fromarray(a.clip(0, 255).astype(np.uint8)).convert("L").filter(
-        ImageFilter.GaussianBlur(2))).astype(np.float32)
+        ImageFilter.GaussianBlur(1.6))).astype(np.float32)
     gy, gx = np.gradient(L)
-    a += (26 * np.tanh((gx + gy) / 28))[..., None] * band[..., None]
+    a += (24 * np.tanh((gx + gy) / 26))[..., None] * band[..., None]
 
-    # 4. specular glints (main up-left, rim light lower-right)
-    rmid = (1 + rr_out) / 2
-    for tg, str_ in ((np.deg2rad(-118), 0.70), (np.deg2rad(52), 0.35)):
-        g = np.exp(-((theta - tg) / 0.40) ** 2 - ((rr - rmid) / (0.30 * (rr_out - 1))) ** 2) * band
+    # 5. specular glints (main up-left, rim light lower-right)
+    rmid = (1 + OUT_RR) / 2
+    for tg, str_ in ((np.deg2rad(-118), 0.75), (np.deg2rad(52), 0.35)):
+        g = np.exp(-((th - tg) / 0.42) ** 2 - ((rr - rmid) / 0.16) ** 2) * band
         a += (np.array([255, 246, 218]) * (g * str_)[..., None])
 
     rgba = np.dstack([a.clip(0, 255), alpha]).astype(np.uint8)
-    ys, xs = np.where(alpha > 0)
-    l, t, r, b = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
-    im2 = Image.fromarray(rgba[t:b, l:r])
-    k = 301.0 / hole_h
-    im2 = im2.resize((max(1, int(im2.width * k)), max(1, int(im2.height * k))), Image.LANCZOS)
-    im2 = im2.resize((287, max(1, int(im2.height * 287 / im2.width))), Image.LANCZOS)
-
-    # cell + soft drop shadow (fits in whatever padding the cell has)
-    cell = Image.new("RGBA", (287, 520), (0, 0, 0, 0))
-    top = (520 - im2.height) // 2
-    off = max(0, min(12, top - 2))
-    sh = np.zeros((520, 287), np.float32)
-    sh[top:top + im2.height, :im2.width] = np.asarray(im2)[..., 3]
-    sh = np.asarray(Image.fromarray(sh.astype(np.uint8)).filter(
-        ImageFilter.GaussianBlur(8))).astype(np.float32)
-    sh = np.roll(sh, off, axis=0) * 0.36
-    cell.paste(Image.new("RGBA", (287, 520), (22, 16, 42, 255)), (0, 0),
-               Image.fromarray(sh.clip(0, 255).astype(np.uint8)))
-    cell.paste(im2, (0, top), im2)
-    cell.save("images/ring-3d-v3.webp", quality=90, method=6)
-    print(f"ring-3d-v3.webp 287x520 from ref, transparent hole {hole_w}x{hole_h}px, "
-          f"band rr 1.0-{rr_out:.2f}, k={k:.3f}")
+    Image.fromarray(rgba).save("images/ring-3d-v4.webp", quality=90, method=6)
+    print(f"ring-3d-v4.webp {CW}x{CH} tilted torus, hole {int(HOLE_W)}x{int(HOLE_H)} "
+          f"at ({CW//2},{CH//2}), band rr 1.0-{OUT_RR:.3f}")
 
 
 if __name__ == "__main__":
